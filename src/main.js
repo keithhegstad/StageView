@@ -287,6 +287,60 @@ class StageView {
         }
       });
     }
+
+    // Camera configuration modal (check if not already bound)
+    const cameraList = document.getElementById('camera-list');
+    if (cameraList && !cameraList.dataset.configListenerBound) {
+      cameraList.addEventListener('click', (e) => {
+        if (e.target.classList.contains('btn-config')) {
+          const cameraIndex = parseInt(e.target.dataset.cameraIndex);
+          this.openCameraConfigModal(cameraIndex);
+        }
+      });
+      cameraList.dataset.configListenerBound = "true";
+    }
+
+    // Camera config modal listeners (check if not already bound)
+    const configModal = document.getElementById('camera-config-modal');
+    if (configModal && !configModal.dataset.listenerBound) {
+      configModal.addEventListener('click', (e) => {
+        if (e.target.id === 'camera-config-modal') {
+          this.closeCameraConfigModal();
+        }
+      });
+      configModal.dataset.listenerBound = "true";
+    }
+
+    const modalCloseBtn = document.getElementById('modal-close-btn');
+    if (modalCloseBtn && !modalCloseBtn.dataset.listenerBound) {
+      modalCloseBtn.addEventListener('click', () => this.closeCameraConfigModal());
+      modalCloseBtn.dataset.listenerBound = "true";
+    }
+
+    const modalCancelBtn = document.getElementById('modal-cancel-btn');
+    if (modalCancelBtn && !modalCancelBtn.dataset.listenerBound) {
+      modalCancelBtn.addEventListener('click', () => this.closeCameraConfigModal());
+      modalCancelBtn.dataset.listenerBound = "true";
+    }
+
+    const modalSaveBtn = document.getElementById('modal-save-btn');
+    if (modalSaveBtn && !modalSaveBtn.dataset.listenerBound) {
+      modalSaveBtn.addEventListener('click', () => this.saveCameraConfig());
+      modalSaveBtn.dataset.listenerBound = "true";
+    }
+
+    const modalFpsMode = document.getElementById('modal-fps-mode');
+    if (modalFpsMode && !modalFpsMode.dataset.listenerBound) {
+      modalFpsMode.addEventListener('change', (e) => {
+        const fpsValueContainer = document.getElementById('modal-fps-value-container');
+        if (e.target.value === 'capped') {
+          fpsValueContainer.style.display = 'block';
+        } else {
+          fpsValueContainer.style.display = 'none';
+        }
+      });
+      modalFpsMode.dataset.listenerBound = "true";
+    }
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -1193,6 +1247,7 @@ class StageView {
         <span class="api-index" title="API Index: Use /api/solo/${i + 1}">${i + 1}</span>
         <input type="text" placeholder="Camera name" value="${cam.name}" data-field="name" />
         <input type="text" placeholder="rtp://224.1.2.4:4000" value="${cam.url}" data-field="url" />
+        <button class="btn-config" data-camera-index="${i}" title="Configure camera settings">⚙️</button>
         <button class="remove-btn" data-remove-index="${i}">✕</button>
       </div>
     `
@@ -1230,18 +1285,24 @@ class StageView {
     const entries = document.querySelectorAll("#camera-list .camera-entry");
     const cameras = [];
 
-    // Build a map of existing cameras by URL for ID preservation
-    const existingCamerasMap = new Map(this.cameras.map(c => [c.url, c.id]));
+    // Build a map of existing cameras by URL for ID and codec_override preservation
+    const existingCamerasMap = new Map(this.cameras.map(c => [c.url, c]));
 
     entries.forEach((entry) => {
       const name = entry.querySelector('[data-field="name"]').value.trim();
       const url = entry.querySelector('[data-field="url"]').value.trim();
       if (url) {
-        cameras.push({
-          id: existingCamerasMap.get(url) || crypto.randomUUID(),
+        const existingCamera = existingCamerasMap.get(url);
+        const camera = {
+          id: existingCamera?.id || crypto.randomUUID(),
           name: name || `Camera ${cameras.length + 1}`,
           url,
-        });
+        };
+        // Preserve codec_override if it exists
+        if (existingCamera?.codec_override) {
+          camera.codec_override = existingCamera.codec_override;
+        }
+        cameras.push(camera);
       }
     });
 
@@ -1293,6 +1354,102 @@ class StageView {
       await invoke("start_streams");
     }
     this.closeSettings();
+  }
+
+  // ── Camera Configuration Modal ──────────────────────────────────────────
+
+  openCameraConfigModal(cameraIndex) {
+    const camera = this.cameras[cameraIndex];
+    if (!camera) return;
+
+    this.editingCameraIndex = cameraIndex;
+
+    const modal = document.getElementById('camera-config-modal');
+    const qualitySelect = document.getElementById('modal-quality-preset');
+    const fpsMode = document.getElementById('modal-fps-mode');
+    const fpsValue = document.getElementById('modal-fps-value');
+    const fpsValueContainer = document.getElementById('modal-fps-value-container');
+
+    // Load current settings or defaults
+    if (camera.codec_override) {
+      qualitySelect.value = camera.codec_override.quality || '';
+
+      if (camera.codec_override.fps_mode === 'native') {
+        fpsMode.value = 'native';
+        fpsValueContainer.style.display = 'none';
+      } else if (typeof camera.codec_override.fps_mode === 'object' && camera.codec_override.fps_mode.capped) {
+        fpsMode.value = 'capped';
+        fpsValue.value = camera.codec_override.fps_mode.capped;
+        fpsValueContainer.style.display = 'block';
+      }
+    } else {
+      // No override - show "Use Global Settings"
+      qualitySelect.value = '';
+      fpsMode.value = 'native';
+      fpsValueContainer.style.display = 'none';
+    }
+
+    modal.style.display = 'flex';
+  }
+
+  closeCameraConfigModal() {
+    const modal = document.getElementById('camera-config-modal');
+    modal.style.display = 'none';
+    this.editingCameraIndex = null;
+  }
+
+  async saveCameraConfig() {
+    if (this.editingCameraIndex === null) return;
+
+    const camera = this.cameras[this.editingCameraIndex];
+    if (!camera) return;
+
+    const quality = document.getElementById('modal-quality-preset').value;
+    const fpsMode = document.getElementById('modal-fps-mode').value;
+
+    // If "Use Global Settings" is selected, remove the override
+    if (quality === '') {
+      delete camera.codec_override;
+    } else {
+      // Build codec_override object
+      let fps_mode;
+      if (fpsMode === 'native') {
+        fps_mode = 'native';
+      } else {
+        // Validate FPS value
+        const fpsValue = parseInt(document.getElementById('modal-fps-value').value, 10);
+        if (isNaN(fpsValue) || fpsValue < 1 || fpsValue > 60) {
+          this.showToast('FPS value must be between 1 and 60', 'error');
+          return;
+        }
+        fps_mode = { capped: fpsValue };
+      }
+
+      camera.codec_override = {
+        quality: quality,
+        fps_mode: fps_mode
+      };
+    }
+
+    this.closeCameraConfigModal();
+
+    // Save config with error handling
+    try {
+      const config = await invoke("get_config");
+      config.cameras = this.cameras;
+      await invoke("save_config", { config });
+
+      // Restart streams to apply new settings
+      await invoke("stop_streams");
+      if (this.cameras.length > 0) {
+        await invoke("start_streams");
+      }
+
+      this.showToast(`Settings updated for ${camera.name}`, 'success');
+    } catch (e) {
+      console.error("Failed to save camera config:", e);
+      this.showToast("Failed to save settings: " + e, 'error');
+    }
   }
 
   // ── Layout Editor ───────────────────────────────────────────────────────

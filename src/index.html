@@ -243,6 +243,42 @@
     </div>
   </div>
 
+  <!-- Camera Configuration Modal -->
+  <div id="camera-config-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Configure Camera</h3>
+        <button class="modal-close" id="modal-close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>
+          Quality Preset
+          <select id="modal-quality-preset">
+            <option value="">Use Global Settings</option>
+            <option value="low">Low (720p, 5 fps)</option>
+            <option value="medium">Medium (1080p, 10 fps)</option>
+            <option value="high">High (Original, 15 fps)</option>
+          </select>
+        </label>
+        <label>
+          FPS Mode
+          <select id="modal-fps-mode">
+            <option value="native">Native</option>
+            <option value="capped">Custom Cap</option>
+          </select>
+        </label>
+        <label id="modal-fps-value-container" style="display: none;">
+          FPS Value
+          <input type="number" id="modal-fps-value" min="1" max="60" value="10" />
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="modal-cancel-btn">Cancel</button>
+        <button class="btn-primary" id="modal-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
   <script src="main.js"></script>
 </body>
 </html>
