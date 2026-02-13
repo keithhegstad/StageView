@@ -28,11 +28,26 @@ pub struct CameraPosition {
     pub z_index: i32, // For picture-in-picture layering
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipOverlay {
+    pub camera_id: String,
+    pub corner: String,  // "TL", "TR", "BL", "BR"
+    pub size_percent: u8, // 10-40
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipConfig {
+    pub main_camera_id: String,
+    pub overlays: Vec<PipOverlay>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LayoutConfig {
     pub name: String,
     pub layout_type: String, // "grid", "custom", "pip"
     pub positions: Vec<CameraPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pip_config: Option<PipConfig>,
 }
 
 impl Default for LayoutConfig {
@@ -41,6 +56,7 @@ impl Default for LayoutConfig {
             name: "Default Grid".into(),
             layout_type: "grid".into(),
             positions: vec![],
+            pip_config: None,
         }
     }
 }
