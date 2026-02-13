@@ -379,7 +379,18 @@ fn delete_preset(state: State<AppState>, name: String) -> Result<(), String> {
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
-/// Wrapper that retries streaming with exponential backoff on failure.
+/// Calculate smart backoff duration based on attempt number.
+/// Strategy: Fast retries initially (1-16s exponential), then 60s for medium-term issues,
+/// then 5min for long outages. Never gives up for 24/7 reliability.
+fn calculate_backoff(attempt: u32) -> std::time::Duration {
+    match attempt {
+        1..=5 => std::time::Duration::from_secs(2u64.pow(attempt.saturating_sub(1))),  // 1s, 2s, 4s, 8s, 16s
+        6..=10 => std::time::Duration::from_secs(60),                                    // 60s
+        _ => std::time::Duration::from_secs(300),                                        // 5 min for long outages
+    }
+}
+
+/// Wrapper that retries streaming with smart backoff. Never gives up.
 async fn stream_camera(
     app: AppHandle,
     ffmpeg_path: PathBuf,
@@ -388,10 +399,6 @@ async fn stream_camera(
     quality: String,
 ) {
     eprintln!("[StageView] Starting stream for {} → {}", camera_id, url);
-
-    const BASE_DELAY_MS: u64 = 1000;
-    const MAX_DELAY_MS: u64 = 60000;
-    const MAX_ATTEMPTS: u32 = 10;
 
     loop {
         // Get current attempt count
@@ -403,16 +410,13 @@ async fn stream_camera(
             *count
         };
 
-        // Emit status event
-        let status = if attempt == 1 {
-            "connecting".to_string()
-        } else {
-            format!("reconnecting (attempt {})", attempt)
-        };
-        let _ = app.emit("camera-status", CameraStatusEvent {
-            camera_id: camera_id.clone(),
-            status,
-        });
+        // Emit status event before attempting connection
+        if attempt == 1 {
+            let _ = app.emit("camera-status", CameraStatusEvent {
+                camera_id: camera_id.clone(),
+                status: "connecting".to_string(),
+            });
+        }
 
         // Attempt to stream
         let state = app.state::<AppState>();
@@ -427,21 +431,24 @@ async fn stream_camera(
             }
         }
 
-        // Check if we should retry
-        if attempt >= MAX_ATTEMPTS {
-            eprintln!("[StageView] Max retry attempts ({}) reached for {}", MAX_ATTEMPTS, camera_id);
+        // Calculate backoff and emit reconnection status
+        let backoff = calculate_backoff(attempt);
+        if attempt > 1 {
+            let status_msg = if attempt <= 10 {
+                format!("reconnecting (attempt {})", attempt)
+            } else {
+                format!("reconnecting ({}m wait)", backoff.as_secs() / 60)
+            };
+
             let _ = app.emit("camera-status", CameraStatusEvent {
                 camera_id: camera_id.clone(),
-                status: "error".into(),
+                status: status_msg,
             });
-            break;
+
+            tokio::time::sleep(backoff).await;
         }
 
-        // Calculate backoff delay: min(BASE * 2^(attempt-1), MAX)
-        let delay_ms = (BASE_DELAY_MS * 2u64.pow(attempt - 1)).min(MAX_DELAY_MS);
-        eprintln!("[StageView] Retrying {} in {}ms (attempt {})", camera_id, delay_ms, attempt);
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        eprintln!("[StageView] Retrying {} (attempt {})", camera_id, attempt + 1);
     }
 }
 
@@ -583,15 +590,18 @@ async fn try_stream_camera(
                     frame_count += 1;
                     bytes_received += frame.len() as u64;
 
+                    // Reset reconnect counter on any successful frame
+                    {
+                        let mut attempts = state.reconnect_attempts.lock().unwrap();
+                        attempts.insert(camera_id.to_string(), 0);  // Reset to 0 on success
+                    }
+
                     if frame_count_local == 1 {
                         eprintln!(
                             "[StageView] First frame for {} ({} bytes)",
                             camera_id,
                             frame.len()
                         );
-
-                        // Reset attempt counter on first successful frame
-                        state.reconnect_attempts.lock().unwrap().insert(camera_id.to_string(), 0);
 
                         let _ = app.emit(
                             "camera-status",
