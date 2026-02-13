@@ -939,6 +939,75 @@ mod tests {
     }
 }
 
+// ── Hardware Encoder Detection ───────────────────────────────────────────────
+
+/// Returns the path to the FFmpeg binary (bundled or system).
+fn get_ffmpeg_path() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    // Dev: in src-tauri/binaries/ (next to Cargo.toml)
+    let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join(if cfg!(windows) { "ffmpeg-x86_64-pc-windows-msvc.exe" } else { "ffmpeg-aarch64-unknown-linux-gnu" });
+
+    // Production: Tauri places sidecar binaries directly next to the exe
+    let prod_sidecar = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+
+    if dev_path.exists() {
+        dev_path
+    } else if prod_sidecar.exists() {
+        prod_sidecar
+    } else {
+        // Fallback: try PATH
+        PathBuf::from("ffmpeg")
+    }
+}
+
+async fn detect_encoders() -> AvailableEncoders {
+    use tokio::process::Command;
+
+    // Get FFmpeg path
+    let ffmpeg_path = get_ffmpeg_path();
+
+    let output = match Command::new(&ffmpeg_path)
+        .args(["-encoders"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => return AvailableEncoders::default(),
+    };
+
+    let encoders_str = String::from_utf8_lossy(&output.stdout);
+
+    AvailableEncoders {
+        nvenc: encoders_str.contains("h264_nvenc"),
+        qsv: encoders_str.contains("h264_qsv"),
+        videotoolbox: encoders_str.contains("h264_videotoolbox"),
+        x264: true,  // libx264 always available
+    }
+}
+
+#[tauri::command]
+async fn get_available_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
+    let encoders = state.available_encoders.lock().unwrap();
+    Ok(encoders.clone())
+}
+
+#[tauri::command]
+async fn refresh_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
+    let encoders = detect_encoders().await;
+    {
+        let mut stored = state.available_encoders.lock().unwrap();
+        *stored = encoders.clone();
+    }
+    Ok(encoders)
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────────
 
 /// Setup logging with daily rotation. The guard must be kept alive for the lifetime
@@ -980,31 +1049,17 @@ pub fn run() {
     let (config, config_path) = load_config();
 
     // Resolve bundled ffmpeg binary path
-    let ffmpeg_path = {
-        let exe_dir = std::env::current_exe()
-            .unwrap_or_default()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
-
-        // Dev: in src-tauri/binaries/ (next to Cargo.toml)
-        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join(if cfg!(windows) { "ffmpeg-x86_64-pc-windows-msvc.exe" } else { "ffmpeg-aarch64-unknown-linux-gnu" });
-
-        // Production: Tauri places sidecar binaries directly next to the exe
-        let prod_sidecar = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
-
-        if dev_path.exists() {
-            dev_path
-        } else if prod_sidecar.exists() {
-            prod_sidecar
-        } else {
-            // Fallback: try PATH
-            PathBuf::from("ffmpeg")
-        }
-    };
+    let ffmpeg_path = get_ffmpeg_path();
     info!("Using ffmpeg at: {}", ffmpeg_path.display());
+
+    // Detect available encoders at startup
+    let available_encoders = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(detect_encoders());
+
+    info!("Available encoders: nvenc={}, qsv={}, videotoolbox={}, x264={}",
+          available_encoders.nvenc, available_encoders.qsv,
+          available_encoders.videotoolbox, available_encoders.x264);
 
     tauri::Builder::default()
         .setup(move |app| {
@@ -1021,7 +1076,7 @@ pub fn run() {
                 // Pool of 32 buffers: allows 2 buffers per camera for up to 16 simultaneous streams
                 // (one being filled, one being encoded) with room for temporary spikes
                 buffer_pool: BufferPool::new(32),
-                available_encoders: Mutex::new(AvailableEncoders::default()),
+                available_encoders: Mutex::new(available_encoders),
             });
 
             // Restore window position and size
@@ -1063,6 +1118,8 @@ pub fn run() {
             save_preset,
             load_preset,
             delete_preset,
+            get_available_encoders,
+            refresh_encoders,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
