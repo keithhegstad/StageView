@@ -29,6 +29,7 @@ function getCurrentWindow() {
 class StageView {
   constructor() {
     this.cameras = [];
+    this.displayOrder = []; // array of indices for grid shuffle (separate from insertion order)
     this.shuffleIntervalSecs = 900;
     this.showStatusDots = true;
     this.showCameraNames = true;
@@ -59,6 +60,7 @@ class StageView {
     try {
       const config = await invoke("get_config");
       this.cameras = config.cameras;
+      this.displayOrder = this.cameras.map((_, i) => i); // initialize display order
       this.shuffleIntervalSecs = config.shuffle_interval_secs;
       this.showStatusDots = config.show_status_dots !== false;
       this.showCameraNames = config.show_camera_names !== false;
@@ -298,8 +300,11 @@ class StageView {
     grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
     grid.style.position = "";
 
-    grid.innerHTML = this.cameras
-      .map((cam, idx) => this.createCameraTile(cam, idx))
+    grid.innerHTML = this.displayOrder
+      .map((index) => {
+        const cam = this.cameras[index];
+        return this.createCameraTile(cam, index);
+      })
       .join("");
 
     this.bindTileEvents(grid);
@@ -455,27 +460,29 @@ class StageView {
       return;
     }
 
-    // Derangement: guarantee every camera moves to a different position.
-    // Sattolo's algorithm produces a single cyclic permutation — no element
-    // can remain in its original slot, giving a full visual refresh.
-    if (this.cameras.length < 2) return;
+    // Shuffle displayOrder indices, not camera objects
+    if (this.displayOrder.length < 2) return;
 
-    for (let i = this.cameras.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * i); // note: excludes i itself
-      [this.cameras[i], this.cameras[j]] = [this.cameras[j], this.cameras[i]];
+    // Sattolo's algorithm on indices
+    for (let i = this.displayOrder.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * i);
+      [this.displayOrder[i], this.displayOrder[j]] =
+        [this.displayOrder[j], this.displayOrder[i]];
     }
 
-    // Rearrange existing DOM tiles instead of rebuilding (avoids spinner flash)
+    // Rearrange DOM tiles using displayOrder
     const grid = document.getElementById("grid");
     const tileMap = {};
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       tileMap[tile.dataset.id] = tile;
     });
 
-    for (const cam of this.cameras) {
+    // Append in displayOrder sequence
+    for (const index of this.displayOrder) {
+      const cam = this.cameras[index];
       const tile = tileMap[cam.id];
       if (tile) {
-        grid.appendChild(tile); // moves existing node to new position
+        grid.appendChild(tile);
       }
     }
   }
@@ -1044,6 +1051,7 @@ class StageView {
     await invoke("save_config", { config });
 
     this.cameras = cameras;
+    this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
     this.shuffleIntervalSecs = shuffleIntervalSecs;
     this.showStatusDots = showStatusDots;
     this.showCameraNames = showCameraNames;
@@ -1425,6 +1433,7 @@ class StageView {
     try {
       const cameras = await invoke("load_preset", { name });
       this.cameras = cameras;
+      this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
       const config = await invoke("get_config");
       config.cameras = cameras;
       await invoke("save_config", { config });
@@ -1479,6 +1488,7 @@ class StageView {
       const temp = this.cameras[this.dragStartIndex];
       this.cameras[this.dragStartIndex] = this.cameras[targetIndex];
       this.cameras[targetIndex] = temp;
+      this.displayOrder = this.cameras.map((_, i) => i); // resync display order after manual reorder
       this.render();
       this.saveCameraOrder();
     }
