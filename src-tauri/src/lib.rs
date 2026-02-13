@@ -488,9 +488,9 @@ fn select_best_h264_encoder(available: &AvailableEncoders) -> &'static str {
 }
 
 fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(20);
 
-    // Encoder-specific args
+    // Encoder-specific args with quality control
     match encoder {
         "h264_nvenc" => {
             args.extend([
@@ -503,6 +503,17 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "-rc".to_string(),
                 "vbr".to_string(),
             ]);
+
+            // NVENC quality control (use -cq instead of -crf)
+            let cq = match quality {
+                Quality::Low => "28",
+                Quality::Medium => "23",
+                Quality::High => "18",
+            };
+            args.extend([
+                "-cq".to_string(),
+                cq.to_string(),
+            ]);
         }
         "h264_qsv" => {
             args.extend([
@@ -510,8 +521,17 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "h264_qsv".to_string(),
                 "-preset".to_string(),
                 "medium".to_string(),
+            ]);
+
+            // QSV quality control (dynamic global_quality)
+            let gq = match quality {
+                Quality::Low => "28",
+                Quality::Medium => "25",
+                Quality::High => "20",
+            };
+            args.extend([
                 "-global_quality".to_string(),
-                "25".to_string(),
+                gq.to_string(),
             ]);
         }
         "h264_videotoolbox" => {
@@ -520,6 +540,17 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "h264_videotoolbox".to_string(),
                 "-profile:v".to_string(),
                 "high".to_string(),
+            ]);
+
+            // Videotoolbox quality control (use bitrate)
+            let bitrate = match quality {
+                Quality::Low => "1M",
+                Quality::Medium => "2.5M",
+                Quality::High => "5M",
+            };
+            args.extend([
+                "-b:v".to_string(),
+                bitrate.to_string(),
             ]);
         }
         "libx264" => {
@@ -531,11 +562,22 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "-tune".to_string(),
                 "zerolatency".to_string(),
             ]);
+
+            // x264 quality control (CRF)
+            let crf = match quality {
+                Quality::Low => "28",
+                Quality::Medium => "23",
+                Quality::High => "18",
+            };
+            args.extend([
+                "-crf".to_string(),
+                crf.to_string(),
+            ]);
         }
         _ => {}
     }
 
-    // Quality-specific args
+    // Scale and framerate (common to all encoders)
     match quality {
         Quality::Low => {
             args.extend([
@@ -543,8 +585,6 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "scale=-2:720".to_string(),
                 "-r".to_string(),
                 "5".to_string(),
-                "-crf".to_string(),
-                "28".to_string(),
             ]);
         }
         Quality::Medium => {
@@ -553,16 +593,12 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
                 "scale=-2:1080".to_string(),
                 "-r".to_string(),
                 "10".to_string(),
-                "-crf".to_string(),
-                "23".to_string(),
             ]);
         }
         Quality::High => {
             args.extend([
                 "-r".to_string(),
                 "15".to_string(),
-                "-crf".to_string(),
-                "18".to_string(),
             ]);
         }
     }
