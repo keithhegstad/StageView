@@ -978,6 +978,7 @@ class StageView {
       .map(
         (cam, i) => `
       <div class="camera-entry" data-index="${i}">
+        <span class="api-index" title="API Index: Use /api/solo/${i + 1}">${i + 1}</span>
         <input type="text" placeholder="Camera name" value="${cam.name}" data-field="name" />
         <input type="text" placeholder="rtp://224.1.2.4:4000" value="${cam.url}" data-field="url" />
         <button class="remove-btn" data-remove-index="${i}">✕</button>
