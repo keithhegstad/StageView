@@ -42,6 +42,35 @@ pub enum Quality {
     High,    // Original, 15 fps
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FpsMode {
+    Native,      // No -r flag - use camera's native FPS
+    #[serde(rename = "capped")]
+    Capped(u32), // Add -r N to cap FPS
+}
+
+impl Default for FpsMode {
+    fn default() -> Self {
+        FpsMode::Native
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CameraCodecSettings {
+    pub quality: Quality,
+    pub fps_mode: FpsMode,
+}
+
+impl Default for CameraCodecSettings {
+    fn default() -> Self {
+        Self {
+            quality: Quality::Medium,
+            fps_mode: FpsMode::Native,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct StreamConfig {
     pub codec: CodecType,
@@ -85,6 +114,8 @@ pub struct Camera {
     pub id: String,
     pub name: String,
     pub url: String,
+    #[serde(default)]
+    pub codec_override: Option<CameraCodecSettings>,
 }
 
 // Deprecated: Used for backward compatibility with custom layouts.
