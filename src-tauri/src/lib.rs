@@ -18,6 +18,8 @@ pub struct Camera {
     pub url: String,
 }
 
+// Deprecated: Used for backward compatibility with custom layouts.
+// New layouts should use pip_config instead.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CameraPosition {
     pub camera_id: String,
@@ -73,7 +75,7 @@ pub struct PipConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LayoutConfig {
     pub name: String,
-    pub layout_type: String, // "grid", "custom", "pip"
+    pub layout_type: String, // "grid", "pip"
     pub positions: Vec<CameraPosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pip_config: Option<PipConfig>,

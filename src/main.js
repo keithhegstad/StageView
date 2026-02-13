@@ -45,7 +45,7 @@ class StageView {
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
     this.layouts = [];
     this.activeLayout = null;
-    this.layoutMode = "grid"; // "grid", "custom", "pip"
+    this.layoutMode = "grid"; // "grid", "pip"
     this.presets = [];
     this.draggedTile = null;
     this.dragStartIndex = null;
@@ -229,7 +229,8 @@ class StageView {
     } else if (this.layoutMode === "pip") {
       this.renderPipLayout(grid);
     } else {
-      this.renderCustomLayout(grid);
+      // Fallback to grid for legacy custom layouts
+      this.renderGridLayout(grid);
     }
   }
 
@@ -242,46 +243,6 @@ class StageView {
 
     grid.innerHTML = this.cameras
       .map((cam, idx) => this.createCameraTile(cam, idx))
-      .join("");
-
-    this.bindTileEvents(grid);
-  }
-
-  renderCustomLayout(grid) {
-    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
-    if (!currentLayout || currentLayout.positions.length === 0) {
-      // Fallback to grid if no custom positions
-      this.renderGridLayout(grid);
-      return;
-    }
-
-    // For custom layouts, use absolute positioning
-    grid.style.gridTemplateColumns = "";
-    grid.style.gridTemplateRows = "";
-    grid.style.position = "relative";
-
-    grid.innerHTML = currentLayout.positions
-      .map((pos) => {
-        const cam = this.cameras.find(c => c.id === pos.camera_id);
-        if (!cam) return "";
-
-        const idx = this.cameras.findIndex(c => c.id === cam.id);
-        return `
-          <div class="camera-tile" data-id="${cam.id}" style="
-            position: absolute;
-            left: ${pos.x * 100}%;
-            top: ${pos.y * 100}%;
-            width: ${pos.width * 100}%;
-            height: ${pos.height * 100}%;
-            z-index: ${pos.z_index};
-          ">
-            <div class="loading-spinner"></div>
-            <img />
-            <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-            <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${cam.name}</div>
-          </div>
-        `;
-      })
       .join("");
 
     this.bindTileEvents(grid);
@@ -1081,45 +1042,8 @@ class StageView {
       return;
     }
 
-    // Custom layout editor
-    container.innerHTML = this.cameras.map((cam, idx) => {
-      const pos = layout.positions.find(p => p.camera_id === cam.id) || {
-        camera_id: cam.id,
-        x: 0,
-        y: 0,
-        width: 0.5,
-        height: 0.5,
-        z_index: idx
-      };
-
-      return `
-        <div class="camera-position-editor" data-camera-id="${cam.id}">
-          <h4>${cam.name}</h4>
-          <div class="position-inputs">
-            <label>
-              X (0-1):
-              <input type="number" step="0.01" min="0" max="1" value="${pos.x}" data-field="x" />
-            </label>
-            <label>
-              Y (0-1):
-              <input type="number" step="0.01" min="0" max="1" value="${pos.y}" data-field="y" />
-            </label>
-            <label>
-              Width (0-1):
-              <input type="number" step="0.01" min="0" max="1" value="${pos.width}" data-field="width" />
-            </label>
-            <label>
-              Height (0-1):
-              <input type="number" step="0.01" min="0" max="1" value="${pos.height}" data-field="height" />
-            </label>
-            <label>
-              Z-Index:
-              <input type="number" step="1" value="${pos.z_index}" data-field="z_index" />
-            </label>
-          </div>
-        </div>
-      `;
-    }).join('');
+    // Fallback for any other layout type
+    container.innerHTML = '<p class="hint">Grid layout automatically positions cameras. No manual positioning needed.</p>';
   }
 
   handleLayoutTypeChange(newType) {
@@ -1369,23 +1293,6 @@ class StageView {
         main_camera_id: mainCameraId,
         overlays: overlays
       };
-    } else if (layoutType !== 'grid') {
-      // Collect positions from editor inputs for custom layouts
-      document.querySelectorAll('.camera-position-editor').forEach(editor => {
-        const cameraId = editor.dataset.cameraId;
-        const inputs = editor.querySelectorAll('input');
-
-        const pos = {
-          camera_id: cameraId,
-          x: parseFloat(inputs[0].value) || 0,
-          y: parseFloat(inputs[1].value) || 0,
-          width: parseFloat(inputs[2].value) || 0.5,
-          height: parseFloat(inputs[3].value) || 0.5,
-          z_index: parseInt(inputs[4].value) || 0
-        };
-
-        positions.push(pos);
-      });
     }
 
     const newLayout = {

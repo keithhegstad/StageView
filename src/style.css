@@ -76,7 +76,6 @@ button {
   transform: scale(1.05);
 }
 
-#grid[data-layout="custom"] .camera-tile,
 #grid[data-layout="pip"] .camera-tile {
   border: 2px solid #444;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
