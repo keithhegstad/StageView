@@ -8,6 +8,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::Command;
+use tracing::{error, info, debug};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 // ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -401,7 +404,7 @@ async fn stream_camera(
     url: String,
     quality: String,
 ) {
-    eprintln!("[StageView] Starting stream for {} → {}", camera_id, url);
+    info!("Starting stream for {} → {}", camera_id, url);
 
     loop {
         // Get current attempt count
@@ -423,12 +426,12 @@ async fn stream_camera(
         let state = app.state::<AppState>();
         match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url, &quality).await {
             Ok(()) => {
-                eprintln!("[StageView] Stream ended normally for {}", camera_id);
+                info!("Stream ended normally for {}", camera_id);
                 // Reset attempt counter on success
                 state.reconnect_attempts.lock().unwrap().insert(camera_id.clone(), 0);
             }
             Err(e) => {
-                eprintln!("[StageView] Stream failed for {}: {}", camera_id, e);
+                error!("Stream failed for {}: {}", camera_id, e);
             }
         }
 
@@ -447,7 +450,7 @@ async fn stream_camera(
 
         tokio::time::sleep(backoff).await;
 
-        eprintln!("[StageView] Retrying {} (attempt {})", camera_id, attempt + 1);
+        info!("Retrying {} (attempt {})", camera_id, attempt + 1);
     }
 }
 
@@ -527,7 +530,7 @@ async fn try_stream_camera(
         "pipe:1".into(),
     ]);
 
-    eprintln!("[StageView] ffmpeg args: {}", args.join(" "));
+    debug!("ffmpeg args: {}", args.join(" "));
 
     let mut cmd = Command::new(ffmpeg_path);
     cmd.args(&args)
@@ -544,7 +547,7 @@ async fn try_stream_camera(
 
     let mut child = cmd.spawn()
         .map_err(|e| {
-            eprintln!("[StageView] Failed to spawn ffmpeg for {}: {}", camera_id, e);
+            error!("Failed to spawn ffmpeg for {}: {}", camera_id, e);
             e
         })?;
 
@@ -572,7 +575,7 @@ async fn try_stream_camera(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[StageView] Read error for {}: {}", camera_id, e);
+                error!("Read error for {}: {}", camera_id, e);
                 return Err(Box::new(e));
             }
         };
@@ -590,8 +593,8 @@ async fn try_stream_camera(
                     bytes_received += frame.len() as u64;
 
                     if frame_count_local == 1 {
-                        eprintln!(
-                            "[StageView] First frame for {} ({} bytes)",
+                        info!(
+                            "First frame for {} ({} bytes)",
                             camera_id,
                             frame.len()
                         );
@@ -661,8 +664,8 @@ async fn try_stream_camera(
     // Return buffer to pool before stream ends
     state.buffer_pool.release(frame);
 
-    eprintln!(
-        "[StageView] Stream ended for {} after {} frames",
+    info!(
+        "Stream ended for {} after {} frames",
         camera_id, frame_count_local
     );
 
@@ -677,11 +680,11 @@ async fn run_api_server(app: AppHandle, port: u16) {
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
-            eprintln!("[StageView] API server listening on http://{}", addr);
+            info!("API server listening on http://{}", addr);
             l
         }
         Err(e) => {
-            eprintln!("[StageView] Failed to start API server on {}: {}", addr, e);
+            error!("Failed to start API server on {}: {}", addr, e);
             return;
         }
     };
@@ -704,7 +707,7 @@ async fn run_api_server(app: AppHandle, port: u16) {
             let first_line = request.lines().next().unwrap_or("");
             let path = first_line.split_whitespace().nth(1).unwrap_or("/");
 
-            eprintln!("[StageView] API request from {}: {}", peer, path);
+            debug!("API request from {}: {}", peer, path);
 
             let (status, body) = if path == "/api/grid" {
                 let _ = app_handle.emit("remote-command", RemoteCommandEvent {
@@ -868,8 +871,39 @@ mod tests {
 
 // ── App Entry ────────────────────────────────────────────────────────────────
 
+/// Setup logging with daily rotation. The guard must be kept alive for the lifetime
+/// of the application, otherwise logging will stop when it's dropped.
+fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
+    // Create logs directory
+    let log_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("StageView")
+        .join("logs");
+
+    std::fs::create_dir_all(&log_dir).ok();
+
+    // Daily rotation, keep 5 files
+    let file_appender = tracing_appender::rolling::daily(log_dir.clone(), "stageview.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+        .init();
+
+    info!("StageView logging initialized");
+    info!("Logs directory: {}", log_dir.display());
+
+    guard
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Setup logging and keep guard alive for application lifetime
+    let _log_guard = setup_logging();
     let (config, config_path) = load_config();
 
     // Resolve bundled ffmpeg binary path
@@ -897,7 +931,7 @@ pub fn run() {
             PathBuf::from("ffmpeg")
         }
     };
-    eprintln!("[StageView] Using ffmpeg at: {}", ffmpeg_path.display());
+    info!("Using ffmpeg at: {}", ffmpeg_path.display());
 
     tauri::Builder::default()
         .setup(move |app| {
