@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StageView</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Camera Grid -->
+  <div id="grid"></div>
+
+  <!-- Pixel Refresh Overlay (burn-in protection in solo mode) -->
+  <div id="pixel-refresh"></div>
+
+  <!-- Empty State -->
+  <div id="empty-state">
+    <div class="empty-icon">📷</div>
+    <h2>No cameras configured</h2>
+    <p>Open settings to add your first camera feed</p>
+    <button id="empty-add-camera">Add Camera</button>
+  </div>
+
+  <!-- Toolbar (auto-hides) -->
+  <div id="toolbar">
+    <span id="shuffle-timer" title="Time until next shuffle"></span>
+
+    <!-- Camera selector -->
+    <div class="toolbar-camera-group">
+      <button id="camera-menu-btn" title="Camera selector">
+        <svg id="camera-menu-icon-grid" class="toolbar-icon" viewBox="0 0 16 16" fill="none">
+          <rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        <svg id="camera-menu-icon-solo" class="toolbar-icon" viewBox="0 0 16 16" fill="none" style="display:none">
+          <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
+        </svg>
+        <span id="camera-menu-label"></span>
+        <svg class="toolbar-chevron" viewBox="0 0 10 6" fill="none">
+          <path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div id="camera-menu" class="camera-menu hidden">
+        <div class="camera-menu-list">
+          <button class="camera-menu-item grid-view-item" id="grid-view-btn">
+            <div class="camera-menu-item-icon">
+              <svg viewBox="0 0 16 16" fill="none">
+                <rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+                <rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+                <rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+                <rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              </svg>
+            </div>
+            <span class="camera-menu-item-label">Grid View</span>
+            <svg class="camera-menu-check" viewBox="0 0 16 16" fill="none"><path d="M3 8.5L6.5 12L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="camera-menu-divider"></div>
+          <div id="camera-menu-cameras"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar-separator"></div>
+
+    <button id="fullscreen-btn" title="Toggle fullscreen">
+      <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none">
+        <path d="M2 5V3C2 2.44772 2.44772 2 3 2H5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M11 2H13C13.5523 2 14 2.44772 14 3V5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M14 11V13C14 13.5523 13.5523 14 13 14H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M5 14H3C2.44772 14 2 13.5523 2 13V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="settings-btn" title="Settings">
+      <svg class="toolbar-icon" viewBox="0 0 24 24" fill="none">
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Settings Panel -->
+  <div id="settings-overlay" class="hidden"></div>
+  <div id="settings" class="hidden">
+    <div class="settings-header">
+      <h2>Settings</h2>
+      <button class="close-btn" id="settings-close-btn">✕</button>
+    </div>
+
+    <div class="settings-body">
+      <!-- Camera List -->
+      <section>
+        <h3>Cameras</h3>
+        <div id="camera-list"></div>
+        <button class="add-btn" id="add-camera-btn">+ Add Camera</button>
+      </section>
+
+      <!-- Shuffle Interval -->
+      <section>
+        <h3>Burn-in Protection</h3>
+        <label>
+          Shuffle interval
+          <div class="interval-input">
+            <input type="number" id="shuffle-interval" min="1" max="1440" value="15" />
+            <span>minutes</span>
+          </div>
+        </label>
+        <p class="hint">Cameras swap positions to prevent screen burn-in</p>
+      </section>
+
+      <!-- Display -->
+      <section>
+        <h3>Display</h3>
+        <label class="toggle-row">
+          <span>Show status indicators</span>
+          <input type="checkbox" id="show-status-dots" checked />
+        </label>
+        <label class="toggle-row">
+          <span>Show camera names</span>
+          <input type="checkbox" id="show-camera-names" checked />
+        </label>
+      </section>
+
+      <!-- Performance -->
+      <section>
+        <h3>Performance</h3>
+        <label>
+          Stream quality
+          <select id="quality-select">
+            <option value="low">Low (5 fps, 640p) — slow devices</option>
+            <option value="medium" selected>Medium (10 fps) — balanced</option>
+            <option value="high">High (15 fps) — powerful devices</option>
+          </select>
+        </label>
+        <p class="hint">Lower quality reduces CPU usage for devices like Raspberry Pi</p>
+      </section>
+
+      <!-- Network Control -->
+      <section>
+        <h3>Network Control</h3>
+        <label>
+          API port
+          <div class="interval-input">
+            <input type="number" id="api-port" min="1024" max="65535" value="8090" />
+          </div>
+        </label>
+        <p class="hint">HTTP API for Stream Deck / Companion control (requires restart)</p>
+        <div class="api-endpoints">
+          <p class="hint" style="margin-top:12px;font-family:monospace">
+            GET /api/solo/1 — solo camera 1<br>
+            GET /api/solo/2 — solo camera 2<br>
+            GET /api/grid — return to grid<br>
+            GET /api/status — list cameras
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <div class="settings-footer">
+      <button class="save-btn" id="save-settings-btn">Save & Apply</button>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
