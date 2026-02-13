@@ -66,6 +66,15 @@
 
     <div class="toolbar-separator"></div>
 
+    <button id="layout-editor-btn" class="toolbar-btn" title="Layout Editor">
+      <svg class="toolbar-icon" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+        <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+        <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+        <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+      </svg>
+    </button>
+
     <button id="fullscreen-btn" title="Toggle fullscreen">
       <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none">
         <path d="M2 5V3C2 2.44772 2.44772 2 3 2H5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -161,6 +170,35 @@
 
     <div class="settings-footer">
       <button class="save-btn" id="save-settings-btn">Save & Apply</button>
+    </div>
+  </div>
+
+  <!-- Layout Editor Overlay -->
+  <div id="layout-editor-overlay" class="overlay" style="display: none;">
+    <div id="layout-editor-panel" class="panel">
+      <h2>Layout Editor</h2>
+      <div class="layout-controls">
+        <label>
+          Layout Name:
+          <input type="text" id="layout-name-input" placeholder="My Layout" />
+        </label>
+        <label>
+          Layout Type:
+          <select id="layout-type-select">
+            <option value="grid">Auto Grid</option>
+            <option value="custom">Custom Positions</option>
+            <option value="pip">Picture-in-Picture</option>
+          </select>
+        </label>
+      </div>
+      <div id="layout-camera-list" class="layout-camera-list">
+        <!-- Camera position editors -->
+      </div>
+      <div class="panel-actions">
+        <button id="save-layout-btn" class="btn-primary">Save Layout</button>
+        <button id="apply-layout-btn" class="btn-primary">Apply Now</button>
+        <button id="close-layout-editor-btn" class="btn-secondary">Close</button>
+      </div>
     </div>
   </div>
 
