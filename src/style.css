@@ -937,6 +937,13 @@ select option {
   grid-template-columns: repeat(2, 1fr);
   gap: 1rem;
   margin-bottom: 2rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (max-width: 640px) {
+  #health-stats-container {
+    grid-template-columns: 1fr;
+  }
 }
 
 .health-card {
@@ -947,7 +954,7 @@ select option {
   aspect-ratio: 1;
   display: flex;
   flex-direction: column;
-  transition: all 0.4s ease;
+  transition: border-color 0.4s ease, background 0.4s ease;
 }
 
 .health-card.pulse {
@@ -971,7 +978,6 @@ select option {
   margin-bottom: 0.75rem;
   color: #4da6ff;
   font-size: 1rem;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 .health-metrics {
@@ -993,16 +999,14 @@ select option {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 .health-value {
   color: #fff;
   font-weight: 700;
   font-size: 1.2rem;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   margin-top: 0.25rem;
-  transition: all 0.4s ease;
+  transition: color 0.4s ease;
 }
 
 /* Color-coded metric values */
