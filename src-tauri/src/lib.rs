@@ -16,25 +16,25 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 // ── Codec Configuration ──────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum CodecType {
     H264,
     MJPEG,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum EncoderType {
     Auto,         // Try hardware, fallback to software
     Nvenc,        // Force NVIDIA
     QSV,          // Force Intel
-    VideoToolbox, // Force macOS
+    Videotoolbox, // Force macOS
     X264,         // Force software H.264
     MJPEG,        // Force MJPEG
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
     Low,     // 720p max, 5 fps
@@ -42,7 +42,7 @@ pub enum Quality {
     High,    // Original, 15 fps
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct StreamConfig {
     pub codec: CodecType,
     pub encoder: EncoderType,
@@ -59,7 +59,7 @@ impl Default for StreamConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AvailableEncoders {
     pub nvenc: bool,
     pub qsv: bool,
