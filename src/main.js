@@ -266,6 +266,7 @@ class StageView {
     if (pipContainer) {
       pipContainer.addEventListener('click', (e) => {
         if (e.target.id === 'add-pip-overlay') {
+          console.log('[PIP] Add overlay button clicked');
           this.addPipOverlay();
         }
         if (e.target.classList.contains('pip-overlay-remove')) {
@@ -1477,7 +1478,10 @@ class StageView {
   }
 
   addPipOverlay() {
+    console.log('[PIP] addPipOverlay called');
+
     const currentOverlays = this.getActivePipOverlays();
+    console.log('[PIP] Current overlays:', currentOverlays);
 
     // Find an available corner
     const corners = ['TL', 'TR', 'BL', 'BR'];
@@ -1485,15 +1489,20 @@ class StageView {
     const availableCorner = corners.find(c => !usedCorners.includes(c));
 
     if (!availableCorner) {
+      console.log('[PIP] All corners occupied');
       alert('All corners are occupied. Remove an overlay before adding a new one.');
       return;
     }
 
-    // Find a camera that's not already the main camera
-    const mainCameraId = document.getElementById('pip-main-camera').value;
+    // Find an available camera
+    const mainCameraId = document.getElementById('pip-main-camera')?.value;
+    console.log('[PIP] Main camera:', mainCameraId);
+
     const availableCamera = this.cameras.find(c => c.id !== mainCameraId);
+    console.log('[PIP] Available camera:', availableCamera);
 
     if (!availableCamera) {
+      console.log('[PIP] No available cameras');
       alert('No available cameras for overlay.');
       return;
     }
@@ -1504,10 +1513,11 @@ class StageView {
       size_percent: 25
     };
 
+    console.log('[PIP] Adding overlay:', newOverlay);
     currentOverlays.push(newOverlay);
 
-    // Re-render the overlays using the helper method
     const layout = this.getCurrentPipLayout();
+    console.log('[PIP] Rendering with layout:', layout);
     this.renderPipConfig(layout);
   }
 
