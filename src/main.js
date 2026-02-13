@@ -276,12 +276,19 @@ class StageView {
     grid.style.gridTemplateRows = "";
     grid.style.position = "relative";
 
-    // Define corner position mappings (2% margin from edges)
+    // Constants for PIP positioning
+    const OVERLAY_MARGIN = '2%';
+    const OVERLAY_BASE_Z_INDEX = 10;
+    const MAIN_CAMERA_Z_INDEX = 1;
+    const MIN_SIZE_PERCENT = 10;
+    const MAX_SIZE_PERCENT = 40;
+
+    // Define corner position mappings
     const positions = {
-      TL: { left: '2%', top: '2%' },
-      TR: { right: '2%', top: '2%' },
-      BL: { left: '2%', bottom: '2%' },
-      BR: { right: '2%', bottom: '2%' }
+      TL: { left: OVERLAY_MARGIN, top: OVERLAY_MARGIN },
+      TR: { right: OVERLAY_MARGIN, top: OVERLAY_MARGIN },
+      BL: { left: OVERLAY_MARGIN, bottom: OVERLAY_MARGIN },
+      BR: { right: OVERLAY_MARGIN, bottom: OVERLAY_MARGIN }
     };
 
     let tiles = [];
@@ -289,21 +296,8 @@ class StageView {
     // 1. Create main camera tile (100% width/height, z-index: 1)
     const mainCamera = this.cameras.find(c => c.id === pipConfig.main_camera_id);
     if (mainCamera) {
-      tiles.push(`
-        <div class="camera-tile" data-id="${mainCamera.id}" style="
-          position: absolute;
-          left: 0;
-          top: 0;
-          width: 100%;
-          height: 100%;
-          z-index: 1;
-        ">
-          <div class="loading-spinner"></div>
-          <img />
-          <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-          <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${mainCamera.name}</div>
-        </div>
-      `);
+      const mainStyle = 'position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: ' + MAIN_CAMERA_Z_INDEX;
+      tiles.push(this.createCameraTileHTML(mainCamera, mainStyle));
     }
 
     // 2. Create overlay tiles for each PIP overlay
@@ -313,41 +307,33 @@ class StageView {
 
       const corner = overlay.corner;
       const cornerPos = positions[corner] || positions.BR; // Default to BR if corner not found
-      const size = `${overlay.size_percent}%`;
 
-      // Build position style string
-      let positionStyle = '';
-      if (cornerPos.left !== undefined) {
-        positionStyle += `left: ${cornerPos.left}; `;
-      }
-      if (cornerPos.right !== undefined) {
-        positionStyle += `right: ${cornerPos.right}; `;
-      }
-      if (cornerPos.top !== undefined) {
-        positionStyle += `top: ${cornerPos.top}; `;
-      }
-      if (cornerPos.bottom !== undefined) {
-        positionStyle += `bottom: ${cornerPos.bottom}; `;
-      }
+      // Validate and clamp size_percent to backend-enforced range
+      const sizePercent = Math.max(MIN_SIZE_PERCENT, Math.min(MAX_SIZE_PERCENT, overlay.size_percent || 25));
+      const size = `${sizePercent}%`;
 
-      tiles.push(`
-        <div class="camera-tile" data-id="${overlayCamera.id}" style="
-          position: absolute;
-          ${positionStyle}
-          width: ${size};
-          height: ${size};
-          z-index: ${10 + idx};
-        ">
-          <div class="loading-spinner"></div>
-          <img />
-          <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-          <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${overlayCamera.name}</div>
-        </div>
-      `);
+      // Build position style using array-based approach
+      const positionStyles = Object.entries(cornerPos)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('; ');
+
+      const overlayStyle = `position: absolute; ${positionStyles}; width: ${size}; height: ${size}; z-index: ${OVERLAY_BASE_Z_INDEX + idx}`;
+      tiles.push(this.createCameraTileHTML(overlayCamera, overlayStyle));
     });
 
     grid.innerHTML = tiles.join("");
     this.bindTileEvents(grid);
+  }
+
+  createCameraTileHTML(camera, styleString) {
+    return `
+      <div class="camera-tile" data-id="${camera.id}" style="${styleString}">
+        <div class="loading-spinner"></div>
+        <img />
+        <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
+        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${camera.name}</div>
+      </div>
+    `;
   }
 
   createCameraTile(cam, idx) {
