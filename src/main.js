@@ -142,6 +142,11 @@ class StageView {
         await invoke("start_streams");
       }
 
+      // Initialize health states for all cameras
+      this.cameras.forEach(cam => {
+        this.cameraHealthStates.set(cam.id, 'offline');
+      });
+
       // Start health monitoring
       this.startHealthMonitoring();
     } catch (err) {
@@ -961,6 +966,11 @@ class StageView {
   // ── Health Monitoring ───────────────────────────────────────────────────
 
   startHealthMonitoring() {
+    // Clear any existing interval to prevent stacking
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
     // Check every 10 seconds
     this.healthCheckInterval = setInterval(() => {
       const now = Date.now();
@@ -1006,12 +1016,32 @@ class StageView {
   }
 
   showToast(message, type = 'info') {
+    // Get or create toast container
+    let container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      container.style.cssText = 'position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 9999; pointer-events: none;';
+      document.body.appendChild(container);
+    }
+
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
-    document.body.appendChild(toast);
+    toast.style.pointerEvents = 'auto';
+    container.appendChild(toast);
 
-    setTimeout(() => toast.remove(), type === 'error' ? 10000 : 5000);
+    const duration = type === 'error' ? 10000 : 5000;
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      setTimeout(() => {
+        toast.remove();
+        // Remove container if empty
+        if (container.children.length === 0) {
+          container.remove();
+        }
+      }, 300);
+    }, duration);
   }
 
   closeSettings() {
