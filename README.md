@@ -175,45 +175,135 @@ Display one main camera full-screen with smaller camera overlays in the corners.
 | **F11 / F** | Toggle fullscreen |
 | **Ctrl+N** | Open new window (multi-monitor) |
 
-### Remote Control API
+## Remote API Access
 
-Base URL: `http://localhost:8090` (or configured port)
+StageView's API is accessible on your local network for integration with Stream Deck, Companion, or custom automation.
 
-#### Endpoints
+### Finding Your IP Address
 
-**Solo Camera**
-```http
+**Windows:**
+```bash
+ipconfig
+# Look for "IPv4 Address" under your active network adapter
+# Example: 192.168.1.100
+```
+
+**Linux/macOS:**
+```bash
+ifconfig
+# or
+ip addr show
+```
+
+### API Endpoints
+
+All endpoints respond with JSON and use GET requests.
+
+**Base URL:** `http://YOUR_IP:8090/api/`
+
+#### 1. Solo Camera
+```
 GET /api/solo/:index
 ```
-- `index`: 1-based camera position
-- Response: `{"ok": true, "action": "solo", "index": 1}`
+Switches to solo view for camera at 1-based index.
 
-**Grid View**
-```http
+**Example:** `http://192.168.1.100:8090/api/solo/2`
+
+**Response:**
+```json
+{"ok": true, "action": "solo", "index": 2}
+```
+
+#### 2. Return to Grid
+```
 GET /api/grid
 ```
-- Response: `{"ok": true, "action": "grid"}`
+Returns to grid view (exits solo mode).
 
-**Camera Status**
-```http
+**Example:** `http://192.168.1.100:8090/api/grid`
+
+**Response:**
+```json
+{"ok": true, "action": "grid"}
+```
+
+#### 3. Camera Status
+```
 GET /api/status
 ```
-- Response:
+Lists all cameras with their indices and API numbers.
+
+**Example:** `http://192.168.1.100:8090/api/status`
+
+**Response:**
 ```json
 {
   "ok": true,
   "cameras": [
-    {"index": 1, "name": "Camera 1", "id": "abc123"},
-    {"index": 2, "name": "Camera 2", "id": "def456"}
+    {"index": 1, "id": "uuid-1", "name": "Front Door"},
+    {"index": 2, "id": "uuid-2", "name": "Back Yard"}
   ]
 }
 ```
 
-#### Example: Stream Deck Integration
+**Note:** The index numbers in the API response match the blue numbered badges shown in the settings panel next to each camera name.
 
-1. Add **System > Website** button
-2. Set URL to `http://localhost:8090/api/solo/1`
-3. Repeat for each camera position
+### Integration Examples
+
+**Stream Deck:**
+1. Add "Website" button
+2. Set URL: `http://192.168.1.100:8090/api/solo/1`
+3. Button switches to camera 1 when pressed
+
+**Companion (Bitfocus):**
+1. Use HTTP Request module
+2. Configure GET request to API endpoint
+3. Add to button in Companion
+
+**Custom Script:**
+```bash
+# Switch to camera 3
+curl http://192.168.1.100:8090/api/solo/3
+
+# Return to grid
+curl http://192.168.1.100:8090/api/grid
+
+# Get camera list with API indices
+curl http://192.168.1.100:8090/api/status
+```
+
+### Troubleshooting
+
+**Can't reach API from other device:**
+
+1. **Check firewall** - Port 8090 must be allowed
+   - Windows: Windows Defender Firewall → Allow an app
+   - Linux: `sudo ufw allow 8090`
+   - macOS: System Preferences → Security & Privacy → Firewall
+
+2. **Verify same network** - Both devices must be on same LAN
+
+3. **Test connectivity**
+   ```bash
+   # From other device, ping the StageView PC
+   ping 192.168.1.100
+
+   # If ping works, try API
+   curl http://192.168.1.100:8090/api/status
+   ```
+
+4. **Try localhost first** - On the StageView PC:
+   ```bash
+   curl http://localhost:8090/api/status
+   # Should work if API server is running
+   ```
+
+### Security Notes
+
+**Local Network Only:**
+- API has no authentication
+- Only use on trusted local networks
+- Do NOT expose to internet (no port forwarding)
 
 ## Architecture
 
