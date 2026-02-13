@@ -68,6 +68,9 @@ class StageView {
       this.activeLayout = config.active_layout || "Default Grid";
       this.presets = config.presets || [];
 
+      // Migrate legacy layouts
+      this.migrateLegacyLayouts();
+
       // Determine layout mode
       const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
       this.layoutMode = currentLayout?.layout_type || "grid";
@@ -143,6 +146,60 @@ class StageView {
     this.bindKeys();
     this.updateToolbar();
     this.setupWindowStatePersistence();
+  }
+
+  // ── Legacy Layout Migration ─────────────────────────────────────────────
+
+  migrateLegacyLayouts() {
+    let hasLegacy = false;
+
+    this.layouts = this.layouts.map(layout => {
+      // Migrate custom layouts to grid
+      if (layout.layout_type === "custom") {
+        hasLegacy = true;
+        console.warn(`Legacy custom layout "${layout.name}" migrated to grid`);
+        return {
+          ...layout,
+          layout_type: "grid",
+          pip_config: null
+        };
+      }
+
+      // Detect old PIP layouts with positions instead of pip_config
+      if (layout.layout_type === "pip" && !layout.pip_config && layout.positions?.length > 0) {
+        hasLegacy = true;
+        console.warn(`Legacy PIP layout "${layout.name}" needs reconfiguration`);
+        return {
+          ...layout,
+          pip_config: null
+        };
+      }
+
+      return layout;
+    });
+
+    if (hasLegacy && this.layouts.length > 0) {
+      // Show one-time notification
+      if (!localStorage.getItem('stageview_migration_notified')) {
+        setTimeout(() => {
+          alert("StageView has been simplified! Legacy custom layouts have been converted to Auto Grid. PIP layouts may need reconfiguration.");
+          localStorage.setItem('stageview_migration_notified', 'true');
+        }, 1000);
+      }
+
+      // Save migrated layouts
+      this.saveMigratedLayouts();
+    }
+  }
+
+  async saveMigratedLayouts() {
+    try {
+      const config = await invoke("get_config");
+      config.layouts = this.layouts;
+      await invoke("save_config", { config });
+    } catch (e) {
+      console.error("Failed to save migrated layouts:", e);
+    }
   }
 
   // ── UI Event Binding ───────────────────────────────────────────────────
