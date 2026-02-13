@@ -786,67 +786,103 @@ class StageView {
   }
 
   async loadCodecSettings() {
-    const config = await invoke("get_config");
+    try {
+      const config = await invoke("get_config");
 
-    // Set codec dropdown
-    const codecSelect = document.getElementById("codec-select");
-    if (config.stream_config?.codec) {
-      codecSelect.value = config.stream_config.codec;
+      // Set codec dropdown
+      const codecSelect = document.getElementById("codec-select");
+      if (config.stream_config?.codec && codecSelect) {
+        codecSelect.value = config.stream_config.codec;
+      }
+
+      // Set encoder dropdown
+      const encoderSelect = document.getElementById("encoder-select");
+      if (config.stream_config?.encoder && encoderSelect) {
+        encoderSelect.value = config.stream_config.encoder;
+      }
+
+      // Set quality preset
+      const qualitySelect = document.getElementById("quality-preset-select");
+      if (config.stream_config?.quality && qualitySelect) {
+        qualitySelect.value = config.stream_config.quality;
+      }
+
+      // Update encoder availability
+      await this.updateEncoderOptions();
+    } catch (err) {
+      console.error("Failed to load codec settings:", err);
+      this.showToast("Failed to load codec settings", 'error');
     }
-
-    // Set encoder dropdown
-    const encoderSelect = document.getElementById("encoder-select");
-    if (config.stream_config?.encoder) {
-      encoderSelect.value = config.stream_config.encoder;
-    }
-
-    // Set quality preset
-    const qualitySelect = document.getElementById("quality-preset-select");
-    if (config.stream_config?.quality) {
-      qualitySelect.value = config.stream_config.quality;
-    }
-
-    // Update encoder availability
-    await this.updateEncoderOptions();
   }
 
   async updateEncoderOptions() {
-    const available = await invoke("get_available_encoders");
-    const select = document.getElementById("encoder-select");
-    const status = document.getElementById("encoder-status");
+    try {
+      const available = await invoke("get_available_encoders");
+      const select = document.getElementById("encoder-select");
+      const status = document.getElementById("encoder-status");
 
-    // Enable/disable encoder options based on availability
-    const options = select.querySelectorAll('option');
-    options.forEach(opt => {
-      const value = opt.value;
-      if (value === 'nvenc') opt.disabled = !available.nvenc;
-      else if (value === 'qsv') opt.disabled = !available.qsv;
-      else if (value === 'videotoolbox') opt.disabled = !available.videotoolbox;
-    });
+      if (!select || !status) {
+        console.warn("Encoder UI elements not found");
+        return;
+      }
 
-    // Show detection status
-    if (available.nvenc) {
-      status.textContent = "✓ NVIDIA GPU detected (nvenc)";
-      status.style.color = "#10b981";
-    } else if (available.qsv) {
-      status.textContent = "✓ Intel GPU detected (QSV)";
-      status.style.color = "#10b981";
-    } else if (available.videotoolbox) {
-      status.textContent = "✓ macOS hardware acceleration available";
-      status.style.color = "#10b981";
-    } else {
-      status.textContent = "ℹ Using software encoding (x264)";
-      status.style.color = "#f59e0b";
+      // Enable/disable encoder options based on availability
+      const options = select.querySelectorAll('option');
+      options.forEach(opt => {
+        const value = opt.value;
+        if (value === 'nvenc') opt.disabled = !available.nvenc;
+        else if (value === 'qsv') opt.disabled = !available.qsv;
+        else if (value === 'videotoolbox') opt.disabled = !available.videotoolbox;
+      });
+
+      // Show detection status
+      if (available.nvenc) {
+        status.textContent = "✓ NVIDIA GPU detected (nvenc)";
+        status.style.color = "#10b981";
+      } else if (available.qsv) {
+        status.textContent = "✓ Intel GPU detected (QSV)";
+        status.style.color = "#10b981";
+      } else if (available.videotoolbox) {
+        status.textContent = "✓ macOS hardware acceleration available";
+        status.style.color = "#10b981";
+      } else {
+        status.textContent = "ℹ Using software encoding (x264)";
+        status.style.color = "#f59e0b";
+      }
+    } catch (err) {
+      console.error("Failed to get available encoders:", err);
+      const status = document.getElementById("encoder-status");
+      if (status) {
+        status.textContent = "⚠ Failed to detect hardware";
+        status.style.color = "#ef4444";
+      }
     }
   }
 
   bindCodecListeners() {
-    // Refresh hardware button
-    document.getElementById("refresh-hardware").addEventListener("click", async () => {
-      await invoke("refresh_encoders");
-      await this.updateEncoderOptions();
-      this.showToast("Hardware detection refreshed", 'success');
-    });
+    const refreshBtn = document.getElementById("refresh-hardware");
+    if (!refreshBtn) return;
+
+    // Remove existing listener if present
+    const oldHandler = refreshBtn._codecRefreshHandler;
+    if (oldHandler) {
+      refreshBtn.removeEventListener("click", oldHandler);
+    }
+
+    // Add new listener and store reference
+    const handler = async () => {
+      try {
+        await invoke("refresh_encoders");
+        await this.updateEncoderOptions();
+        this.showToast("Hardware detection refreshed", 'success');
+      } catch (err) {
+        console.error("Failed to refresh encoders:", err);
+        this.showToast("Failed to refresh hardware detection", 'error');
+      }
+    };
+
+    refreshBtn._codecRefreshHandler = handler;
+    refreshBtn.addEventListener("click", handler);
   }
 
   injectHealthSection() {

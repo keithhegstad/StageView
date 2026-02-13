@@ -1433,7 +1433,7 @@ select option {
   font-size: 0.85rem;
 }
 
-.btn-secondary {
+.btn-refresh {
   background: #374151;
   color: #e5e7eb;
   padding: 6px 12px;
@@ -1445,7 +1445,7 @@ select option {
   transition: background var(--transition);
 }
 
-.btn-secondary:hover {
+.btn-refresh:hover {
   background: #4b5563;
 }
 
