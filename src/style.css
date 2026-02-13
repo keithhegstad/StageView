@@ -1382,3 +1382,74 @@ select option {
     opacity: 1;
   }
 }
+
+/* ── Codec Settings ───────────────────────────────────────────────────────── */
+
+.setting-section {
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid #333;
+}
+
+.setting-section h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: #e5e7eb;
+}
+
+.setting-row {
+  margin-bottom: 1rem;
+}
+
+.setting-row label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  color: #d1d5db;
+}
+
+.setting-row select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition);
+  margin-top: 0;
+}
+
+.setting-row select:focus {
+  border-color: var(--accent);
+}
+
+.encoder-status {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.btn-secondary {
+  background: #374151;
+  color: #e5e7eb;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  margin-right: 8px;
+  border: none;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.btn-secondary:hover {
+  background: #4b5563;
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

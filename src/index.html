@@ -147,6 +147,48 @@
         <p class="hint">Lower quality reduces CPU usage for devices like Raspberry Pi</p>
       </section>
 
+      <!-- Stream Encoding -->
+      <div class="setting-section">
+        <h3>Stream Encoding</h3>
+
+        <div class="setting-row">
+          <label>Codec:</label>
+          <select id="codec-select">
+            <option value="h264">H.264 (Hardware Accelerated)</option>
+            <option value="mjpeg" selected>MJPEG (Current)</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <label>Encoder:</label>
+          <select id="encoder-select">
+            <option value="auto">Auto (Best Available)</option>
+            <option value="nvenc">NVIDIA (nvenc)</option>
+            <option value="qsv">Intel (QSV)</option>
+            <option value="videotoolbox">macOS (VideoToolbox)</option>
+            <option value="x264">Software (x264)</option>
+            <option value="mjpeg">MJPEG</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <label>Quality Preset:</label>
+          <select id="quality-preset-select">
+            <option value="low">Low (720p, 5 fps)</option>
+            <option value="medium" selected>Medium (1080p, 10 fps)</option>
+            <option value="high">High (Original, 15 fps)</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <button id="refresh-hardware" class="btn-secondary">Refresh Hardware</button>
+        </div>
+
+        <div class="encoder-status">
+          <span id="encoder-status">Detecting hardware...</span>
+        </div>
+      </div>
+
       <!-- Network Control -->
       <section>
         <h3>Network Control</h3>

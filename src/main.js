@@ -755,7 +755,7 @@ class StageView {
       .classList.contains("visible");
   }
 
-  openSettings() {
+  async openSettings() {
     const overlay = document.getElementById("settings-overlay");
     const panel = document.getElementById("settings");
 
@@ -777,6 +777,76 @@ class StageView {
     this.renderCameraList();
     this.injectHealthSection();
     this.injectPresetSection();
+
+    // Load codec settings
+    await this.loadCodecSettings();
+
+    // Bind codec event listeners
+    this.bindCodecListeners();
+  }
+
+  async loadCodecSettings() {
+    const config = await invoke("get_config");
+
+    // Set codec dropdown
+    const codecSelect = document.getElementById("codec-select");
+    if (config.stream_config?.codec) {
+      codecSelect.value = config.stream_config.codec;
+    }
+
+    // Set encoder dropdown
+    const encoderSelect = document.getElementById("encoder-select");
+    if (config.stream_config?.encoder) {
+      encoderSelect.value = config.stream_config.encoder;
+    }
+
+    // Set quality preset
+    const qualitySelect = document.getElementById("quality-preset-select");
+    if (config.stream_config?.quality) {
+      qualitySelect.value = config.stream_config.quality;
+    }
+
+    // Update encoder availability
+    await this.updateEncoderOptions();
+  }
+
+  async updateEncoderOptions() {
+    const available = await invoke("get_available_encoders");
+    const select = document.getElementById("encoder-select");
+    const status = document.getElementById("encoder-status");
+
+    // Enable/disable encoder options based on availability
+    const options = select.querySelectorAll('option');
+    options.forEach(opt => {
+      const value = opt.value;
+      if (value === 'nvenc') opt.disabled = !available.nvenc;
+      else if (value === 'qsv') opt.disabled = !available.qsv;
+      else if (value === 'videotoolbox') opt.disabled = !available.videotoolbox;
+    });
+
+    // Show detection status
+    if (available.nvenc) {
+      status.textContent = "✓ NVIDIA GPU detected (nvenc)";
+      status.style.color = "#10b981";
+    } else if (available.qsv) {
+      status.textContent = "✓ Intel GPU detected (QSV)";
+      status.style.color = "#10b981";
+    } else if (available.videotoolbox) {
+      status.textContent = "✓ macOS hardware acceleration available";
+      status.style.color = "#10b981";
+    } else {
+      status.textContent = "ℹ Using software encoding (x264)";
+      status.style.color = "#f59e0b";
+    }
+  }
+
+  bindCodecListeners() {
+    // Refresh hardware button
+    document.getElementById("refresh-hardware").addEventListener("click", async () => {
+      await invoke("refresh_encoders");
+      await this.updateEncoderOptions();
+      this.showToast("Hardware detection refreshed", 'success');
+    });
   }
 
   injectHealthSection() {
@@ -1135,6 +1205,13 @@ class StageView {
     const quality = document.getElementById("quality-select").value;
     const apiPort = parseInt(document.getElementById("api-port").value, 10) || 8090;
 
+    // Save codec settings
+    const streamConfig = {
+      codec: document.getElementById("codec-select").value,
+      encoder: document.getElementById("encoder-select").value,
+      quality: document.getElementById("quality-preset-select").value,
+    };
+
     const config = {
       cameras,
       shuffle_interval_secs: shuffleIntervalSecs,
@@ -1144,6 +1221,7 @@ class StageView {
       api_port: apiPort,
       layouts: this.layouts,
       active_layout: this.activeLayout,
+      stream_config: streamConfig,
     };
 
     await invoke("save_config", { config });
@@ -1156,7 +1234,7 @@ class StageView {
     this.quality = quality;
     this.apiPort = apiPort;
 
-    // Restart streams with new camera list
+    // Restart streams with new camera list and codec settings
     await invoke("stop_streams");
     this.render();
     this.startShuffleTimer();
