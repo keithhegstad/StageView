@@ -191,6 +191,40 @@ struct StreamHealthEvent {
     health: StreamHealth,
 }
 
+// ── Buffer Pool ──────────────────────────────────────────────────────────────
+
+/// Reusable buffer pool to prevent memory fragmentation
+struct BufferPool {
+    buffers: Mutex<Vec<Vec<u8>>>,
+    max_buffers: usize,
+}
+
+impl BufferPool {
+    fn new(max_buffers: usize) -> Self {
+        Self {
+            buffers: Mutex::new(Vec::new()),
+            max_buffers,
+        }
+    }
+
+    fn acquire(&self) -> Vec<u8> {
+        self.buffers
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(64 * 1024))
+    }
+
+    fn release(&self, mut buf: Vec<u8>) {
+        buf.clear();
+        let mut pool = self.buffers.lock().unwrap();
+        if pool.len() < self.max_buffers {
+            pool.push(buf);
+        }
+        // Else: drop buffer (pool is full)
+    }
+}
+
 // ── App State ────────────────────────────────────────────────────────────────
 
 struct AppState {
@@ -200,6 +234,7 @@ struct AppState {
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
     stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
+    buffer_pool: BufferPool, // Reusable buffer pool for frame processing
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -520,7 +555,7 @@ async fn try_stream_camera(
 
     let mut stdout = child.stdout.take().unwrap();
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
-    let mut frame = Vec::with_capacity(65_536);
+    let mut frame = state.buffer_pool.acquire(); // Acquire from buffer pool
     let mut prev_byte: u8 = 0;
     let mut frame_count_local: u64 = 0;
 
@@ -602,7 +637,9 @@ async fn try_stream_camera(
                     }
                 }
 
-                frame.clear();
+                // Release buffer back to pool and acquire fresh buffer for next frame
+                let old_frame = std::mem::replace(&mut frame, state.buffer_pool.acquire());
+                state.buffer_pool.release(old_frame);
                 frame.push(0xFF);
                 frame.push(0xD8);
             } else {
@@ -862,6 +899,7 @@ pub fn run() {
                 stream_tasks: Mutex::new(HashMap::new()),
                 reconnect_attempts: Mutex::new(HashMap::new()),
                 stream_health: Mutex::new(HashMap::new()),
+                buffer_pool: BufferPool::new(32), // Pool of 32 buffers
             });
 
             // Restore window position and size
