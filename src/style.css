@@ -970,6 +970,19 @@ select option {
   flex-direction: column;
 }
 
+/* Health state indicators on health cards */
+.health-card[data-health-state="online"] {
+  border-left: 3px solid #10b981;
+}
+
+.health-card[data-health-state="warn"] {
+  border-left: 3px solid #f59e0b;
+}
+
+.health-card[data-health-state="error"] {
+  border-left: 3px solid #ef4444;
+}
+
 .health-camera-name {
   font-weight: 500;
   margin-bottom: 0.5rem;
@@ -1334,4 +1347,34 @@ select option {
 
 .btn-danger:hover {
   background: #c9302c;
+}
+
+/* ── Toast Notifications ──────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 12px 20px;
+  border-radius: 6px;
+  color: white;
+  font-size: 0.9rem;
+  z-index: 9999;
+  animation: slideIn 0.3s ease-out;
+}
+
+.toast-info { background: #3b82f6; }
+.toast-warn { background: #f59e0b; }
+.toast-error { background: #ef4444; }
+.toast-success { background: #10b981; }
+
+@keyframes slideIn {
+  from {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }

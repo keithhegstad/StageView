@@ -51,6 +51,8 @@ class StageView {
     this.draggedTile = null;
     this.dragStartIndex = null;
     this.previousHealthValues = new Map(); // stores previous health values for change detection
+    this.cameraHealthStates = new Map(); // Track health per camera
+    this.healthCheckInterval = null;
     this.init();
   }
 
@@ -139,6 +141,9 @@ class StageView {
       if (this.cameras.length > 0) {
         await invoke("start_streams");
       }
+
+      // Start health monitoring
+      this.startHealthMonitoring();
     } catch (err) {
       console.error("StageView init failed:", err);
       this.render();
@@ -951,6 +956,62 @@ class StageView {
         uptime: uptimeText
       });
     });
+  }
+
+  // ── Health Monitoring ───────────────────────────────────────────────────
+
+  startHealthMonitoring() {
+    // Check every 10 seconds
+    this.healthCheckInterval = setInterval(() => {
+      const now = Date.now();
+
+      this.cameras.forEach((cam) => {
+        const health = this.healthStats.get(cam.id);
+        if (!health) {
+          this.updateCameraHealthState(cam.id, 'offline');
+          return;
+        }
+
+        const lastFrameTime = health.last_frame_time || 0;
+        const offlineSeconds = (now - lastFrameTime) / 1000;
+
+        if (offlineSeconds > 300) {  // 5+ minutes
+          this.updateCameraHealthState(cam.id, 'error');
+        } else if (offlineSeconds > 60) {  // 1+ minute
+          this.updateCameraHealthState(cam.id, 'warn');
+        } else {
+          this.updateCameraHealthState(cam.id, 'online');
+        }
+      });
+    }, 10000);
+  }
+
+  updateCameraHealthState(cameraId, state) {
+    const prevState = this.cameraHealthStates.get(cameraId);
+    if (prevState === state) return;  // No change
+
+    this.cameraHealthStates.set(cameraId, state);
+
+    // Update health card visual state
+    const card = document.querySelector(`[data-camera-id="${cameraId}"]`);
+    if (card) {
+      card.dataset.healthState = state;
+    }
+
+    // Show notification for error state
+    if (state === 'error' && prevState !== 'error') {
+      const cam = this.cameras.find(c => c.id === cameraId);
+      this.showToast(`Camera "${cam?.name || 'Unknown'}" offline for 5+ minutes`, 'error');
+    }
+  }
+
+  showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    setTimeout(() => toast.remove(), type === 'error' ? 10000 : 5000);
   }
 
   closeSettings() {
