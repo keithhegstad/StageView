@@ -615,29 +615,22 @@ fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
         _ => {}
     }
 
-    // Scale and framerate (common to all encoders)
+    // Scale based on quality (no FPS here - handled separately)
     match quality {
         Quality::Low => {
             args.extend([
                 "-vf".to_string(),
                 "scale=-2:720".to_string(),
-                "-r".to_string(),
-                "5".to_string(),
             ]);
         }
         Quality::Medium => {
             args.extend([
                 "-vf".to_string(),
                 "scale=-2:1080".to_string(),
-                "-r".to_string(),
-                "10".to_string(),
             ]);
         }
         Quality::High => {
-            args.extend([
-                "-r".to_string(),
-                "15".to_string(),
-            ]);
+            // No scaling for high quality
         }
     }
 
@@ -669,6 +662,18 @@ fn build_mjpeg_args(quality: &Quality) -> Vec<String> {
         "image2pipe".to_string(),
         "-an".to_string(),
     ]
+}
+
+fn build_fps_args(fps_mode: &FpsMode) -> Vec<String> {
+    match fps_mode {
+        FpsMode::Native => {
+            // No -r flag - camera streams at native FPS
+            Vec::new()
+        }
+        FpsMode::Capped(fps) => {
+            vec!["-r".to_string(), fps.to_string()]
+        }
+    }
 }
 
 /// Calculate smart backoff duration based on attempt number.
@@ -798,7 +803,18 @@ async fn try_stream_camera(
     // Add input URL
     args.extend(["-i".into(), input_url]);
 
-    // Get stream config
+    // Get camera from config
+    let camera = {
+        let cfg = state.config.lock().unwrap();
+        cfg.cameras.iter().find(|c| c.id == camera_id).cloned()
+    };
+
+    let Some(camera) = camera else {
+        error!("Camera {} not found in config", camera_id);
+        return Err("Camera not found in config".into());
+    };
+
+    // Get stream config (global)
     let stream_config = {
         let cfg = state.config.lock().unwrap();
         cfg.stream_config.clone()
@@ -810,9 +826,29 @@ async fn try_stream_camera(
         enc.clone()
     };
 
+    // Determine effective quality and FPS mode
+    let quality = camera.codec_override
+        .as_ref()
+        .map(|c| &c.quality)
+        .unwrap_or(&stream_config.quality);
+
+    let fps_mode = camera.codec_override
+        .as_ref()
+        .map(|c| &c.fps_mode)
+        .unwrap_or(&FpsMode::Native);
+
+    // Create effective stream config with camera's quality override
+    let mut effective_config = stream_config.clone();
+    effective_config.quality = quality.clone();
+
     // Select encoder and build args
-    let (encoder_name, codec_args) = select_encoder(&stream_config, &available);
-    debug!("Using encoder: {} for camera {}", encoder_name, camera_id);
+    let (encoder_name, mut codec_args) = select_encoder(&effective_config, &available);
+
+    // Add FPS args
+    codec_args.extend(build_fps_args(fps_mode));
+
+    debug!("Using encoder: {} for camera {} (quality: {:?}, fps_mode: {:?})",
+           encoder_name, camera_id, quality, fps_mode);
 
     // Add codec-specific args
     for arg in codec_args {
