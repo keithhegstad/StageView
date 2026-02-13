@@ -67,6 +67,22 @@ struct RemoteCommandEvent {
     index: Option<usize>,  // 1-based camera index for solo
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct StreamHealth {
+    pub camera_id: String,
+    pub fps: f32,
+    pub bitrate_kbps: f32,
+    pub frame_count: u64,
+    pub last_frame_at: u64, // Unix timestamp in milliseconds
+    pub uptime_secs: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct StreamHealthEvent {
+    camera_id: String,
+    health: StreamHealth,
+}
+
 // ── App State ────────────────────────────────────────────────────────────────
 
 struct AppState {
@@ -75,6 +91,7 @@ struct AppState {
     ffmpeg_path: PathBuf,
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
+    stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -176,6 +193,11 @@ fn grid_view(state: State<AppState>, app: AppHandle) {
     }
 }
 
+#[tauri::command]
+fn get_stream_health(state: State<AppState>) -> HashMap<String, StreamHealth> {
+    state.stream_health.lock().unwrap().clone()
+}
+
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
 /// Wrapper that retries streaming with exponential backoff on failure.
@@ -254,6 +276,10 @@ async fn try_stream_camera(
     url: &str,
     quality: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let start_time = std::time::Instant::now();
+    let mut frame_count: u64 = 0;
+    let mut bytes_received: u64 = 0;
+    let mut last_health_update = std::time::Instant::now();
 
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
@@ -337,11 +363,24 @@ async fn try_stream_camera(
             e
         })?;
 
+    // Initialize health entry
+    {
+        let mut health_map = state.stream_health.lock().unwrap();
+        health_map.insert(camera_id.to_string(), StreamHealth {
+            camera_id: camera_id.to_string(),
+            fps: 0.0,
+            bitrate_kbps: 0.0,
+            frame_count: 0,
+            last_frame_at: 0,
+            uptime_secs: 0,
+        });
+    }
+
     let mut stdout = child.stdout.take().unwrap();
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
     let mut frame = Vec::with_capacity(65_536);
     let mut prev_byte: u8 = 0;
-    let mut frame_count: u64 = 0;
+    let mut frame_count_local: u64 = 0;
 
     loop {
         let n = match stdout.read(&mut buf).await {
@@ -361,8 +400,11 @@ async fn try_stream_camera(
                 frame.pop();
 
                 if frame.len() > 100 && frame[0] == 0xFF && frame[1] == 0xD8 {
+                    frame_count_local += 1;
                     frame_count += 1;
-                    if frame_count == 1 {
+                    bytes_received += frame.len() as u64;
+
+                    if frame_count_local == 1 {
                         eprintln!(
                             "[StageView] First frame for {} ({} bytes)",
                             camera_id,
@@ -388,6 +430,34 @@ async fn try_stream_camera(
                             data: b64,
                         },
                     );
+
+                    // Update health stats every 2 seconds
+                    if last_health_update.elapsed().as_secs() >= 2 {
+                        let uptime = start_time.elapsed().as_secs();
+                        let fps = frame_count as f32 / uptime as f32;
+                        let bitrate_kbps = (bytes_received as f32 * 8.0) / (uptime as f32 * 1000.0);
+
+                        let health = StreamHealth {
+                            camera_id: camera_id.to_string(),
+                            fps,
+                            bitrate_kbps,
+                            frame_count,
+                            last_frame_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64,
+                            uptime_secs: uptime,
+                        };
+
+                        state.stream_health.lock().unwrap().insert(camera_id.to_string(), health.clone());
+
+                        let _ = app.emit("stream-health", StreamHealthEvent {
+                            camera_id: camera_id.to_string(),
+                            health,
+                        });
+
+                        last_health_update = std::time::Instant::now();
+                    }
                 }
 
                 frame.clear();
@@ -402,7 +472,7 @@ async fn try_stream_camera(
 
     eprintln!(
         "[StageView] Stream ended for {} after {} frames",
-        camera_id, frame_count
+        camera_id, frame_count_local
     );
 
     Ok(())
@@ -550,6 +620,7 @@ pub fn run() {
                 ffmpeg_path,
                 stream_tasks: Mutex::new(HashMap::new()),
                 reconnect_attempts: Mutex::new(HashMap::new()),
+                stream_health: Mutex::new(HashMap::new()),
             });
 
             // Start the HTTP API server for remote control
@@ -567,6 +638,7 @@ pub fn run() {
             stop_streams,
             solo_camera,
             grid_view,
+            get_stream_health,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
