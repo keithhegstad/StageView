@@ -1080,8 +1080,19 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     format!(r#"{{"index":{},"id":"{}","name":"{}"}}"#, i + 1, c.id, c.name)
                 }).collect();
                 ("200 OK", format!(r#"{{"ok":true,"cameras":[{}]}}"#, cameras_json.join(",")))
+            } else if path == "/api/fullscreen" {
+                match api_fullscreen(app_handle.clone()).await {
+                    Ok(result) => ("200 OK", result.to_string()),
+                    Err(e) => ("500 Internal Server Error", serde_json::json!({"ok": false, "error": e}).to_string()),
+                }
+            } else if path == "/api/reload" {
+                let state = app_handle.state::<AppState>();
+                match api_reload(app_handle.clone(), state).await {
+                    Ok(result) => ("200 OK", result.to_string()),
+                    Err(e) => ("500 Internal Server Error", serde_json::json!({"ok": false, "error": e}).to_string()),
+                }
             } else {
-                ("404 Not Found", r#"{"ok":false,"error":"unknown endpoint","endpoints":["/api/solo/:index","/api/grid","/api/status"]}"#.to_string())
+                ("404 Not Found", r#"{"ok":false,"error":"unknown endpoint","endpoints":["/api/solo/:index","/api/grid","/api/status","/api/fullscreen","/api/reload"]}"#.to_string())
             };
 
             let response = format!(
@@ -1345,6 +1356,49 @@ async fn refresh_encoders(state: State<'_, AppState>) -> Result<AvailableEncoder
     Ok(encoders)
 }
 
+#[tauri::command]
+async fn api_fullscreen(app: AppHandle) -> Result<serde_json::Value, String> {
+    let window = app.get_webview_window("main")
+        .ok_or("Main window not found")?;
+
+    let is_fullscreen = window.is_fullscreen()
+        .map_err(|e| e.to_string())?;
+
+    window.set_fullscreen(!is_fullscreen)
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": "fullscreen",
+        "state": if !is_fullscreen { "entered" } else { "exited" }
+    }))
+}
+
+#[tauri::command]
+async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    info!("API reload requested");
+
+    // Reload config from disk
+    let (config, _) = load_config();
+
+    // Update in-memory config
+    {
+        let mut cfg = state.config.lock()
+            .map_err(|_| "Config mutex poisoned")?;
+        *cfg = config;
+    }
+
+    info!("Config reloaded from disk");
+
+    // Emit reload event to frontend
+    let _ = app.emit("reload-config", serde_json::json!({"ok": true}));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": "reload"
+    }))
+}
+
 // ── App Entry ────────────────────────────────────────────────────────────────
 
 /// Setup logging with daily rotation. The guard must be kept alive for the lifetime
@@ -1455,6 +1509,8 @@ pub fn run() {
             delete_preset,
             get_available_encoders,
             refresh_encoders,
+            api_fullscreen,
+            api_reload,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
