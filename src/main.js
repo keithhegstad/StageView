@@ -43,6 +43,9 @@ class StageView {
     this.soloIndex = null; // null = grid view, number = 1-based solo index
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
+    this.layouts = [];
+    this.activeLayout = null;
+    this.layoutMode = "grid"; // "grid", "custom", "pip"
     this.init();
   }
 
@@ -57,6 +60,12 @@ class StageView {
       this.showCameraNames = config.show_camera_names !== false;
       this.quality = config.quality || "medium";
       this.apiPort = config.api_port || 8090;
+      this.layouts = config.layouts || [];
+      this.activeLayout = config.active_layout || "Default Grid";
+
+      // Determine layout mode
+      const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
+      this.layoutMode = currentLayout?.layout_type || "grid";
 
       // Listen for frame events from the Rust backend
       this.unlistenFrame = await listen("camera-frame", (event) => {
@@ -152,6 +161,16 @@ class StageView {
     document.getElementById('settings-close-btn').addEventListener('click', () => this.closeSettings());
     document.getElementById('add-camera-btn').addEventListener('click', () => this.addCameraField());
     document.getElementById('save-settings-btn').addEventListener('click', () => this.saveSettings());
+
+    // Layout editor
+    document.getElementById('layout-editor-btn').addEventListener('click', () => this.openLayoutEditor());
+    document.getElementById('layout-editor-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'layout-editor-overlay') this.closeLayoutEditor();
+    });
+    document.getElementById('close-layout-editor-btn').addEventListener('click', () => this.closeLayoutEditor());
+    document.getElementById('save-layout-btn').addEventListener('click', () => this.saveCurrentLayout());
+    document.getElementById('apply-layout-btn').addEventListener('click', () => this.applyCurrentLayout());
+    document.getElementById('layout-type-select').addEventListener('change', (e) => this.handleLayoutTypeChange(e.target.value));
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -169,24 +188,83 @@ class StageView {
 
     empty.classList.add("hidden");
 
+    // Set layout mode data attribute for CSS
+    grid.setAttribute("data-layout", this.layoutMode);
+
+    // Render based on layout mode
+    if (this.layoutMode === "grid") {
+      this.renderGridLayout(grid);
+    } else {
+      this.renderCustomLayout(grid);
+    }
+  }
+
+  renderGridLayout(grid) {
     const cols = Math.ceil(Math.sqrt(this.cameras.length));
     const rows = Math.ceil(this.cameras.length / cols);
     grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
     grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+    grid.style.position = "";
 
     grid.innerHTML = this.cameras
-      .map(
-        (cam) => `
+      .map((cam, idx) => this.createCameraTile(cam, idx))
+      .join("");
+
+    this.bindTileEvents(grid);
+  }
+
+  renderCustomLayout(grid) {
+    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
+    if (!currentLayout || currentLayout.positions.length === 0) {
+      // Fallback to grid if no custom positions
+      this.renderGridLayout(grid);
+      return;
+    }
+
+    // For custom layouts, use absolute positioning
+    grid.style.gridTemplateColumns = "";
+    grid.style.gridTemplateRows = "";
+    grid.style.position = "relative";
+
+    grid.innerHTML = currentLayout.positions
+      .map((pos) => {
+        const cam = this.cameras.find(c => c.id === pos.camera_id);
+        if (!cam) return "";
+
+        const idx = this.cameras.findIndex(c => c.id === cam.id);
+        return `
+          <div class="camera-tile" data-id="${cam.id}" style="
+            position: absolute;
+            left: ${pos.x * 100}%;
+            top: ${pos.y * 100}%;
+            width: ${pos.width * 100}%;
+            height: ${pos.height * 100}%;
+            z-index: ${pos.z_index};
+          ">
+            <div class="loading-spinner"></div>
+            <img />
+            <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
+            <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${cam.name}</div>
+          </div>
+        `;
+      })
+      .join("");
+
+    this.bindTileEvents(grid);
+  }
+
+  createCameraTile(cam, idx) {
+    return `
       <div class="camera-tile" data-id="${cam.id}">
         <div class="loading-spinner"></div>
         <img />
         <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
         <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${cam.name}</div>
       </div>
-    `
-      )
-      .join("");
+    `;
+  }
 
+  bindTileEvents(grid) {
     // Double-click a tile to solo it
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       tile.addEventListener("dblclick", () => {
@@ -712,6 +790,8 @@ class StageView {
       show_camera_names: showCameraNames,
       quality,
       api_port: apiPort,
+      layouts: this.layouts,
+      active_layout: this.activeLayout,
     };
 
     await invoke("save_config", { config });
@@ -731,6 +811,200 @@ class StageView {
       await invoke("start_streams");
     }
     this.closeSettings();
+  }
+
+  // ── Layout Editor ───────────────────────────────────────────────────────
+
+  openLayoutEditor() {
+    const overlay = document.getElementById('layout-editor-overlay');
+    const nameInput = document.getElementById('layout-name-input');
+    const typeSelect = document.getElementById('layout-type-select');
+
+    // Load current or create new layout
+    const currentLayout = this.layouts.find(l => l.name === this.activeLayout) || {
+      name: 'New Layout',
+      layout_type: 'grid',
+      positions: []
+    };
+
+    nameInput.value = currentLayout.name;
+    typeSelect.value = currentLayout.layout_type;
+
+    this.renderCameraPositionEditors(currentLayout);
+    overlay.style.display = 'flex';
+  }
+
+  closeLayoutEditor() {
+    document.getElementById('layout-editor-overlay').style.display = 'none';
+  }
+
+  renderCameraPositionEditors(layout) {
+    const container = document.getElementById('layout-camera-list');
+
+    if (layout.layout_type === 'grid') {
+      container.innerHTML = '<p class="hint">Grid layout automatically positions cameras. No manual positioning needed.</p>';
+      return;
+    }
+
+    container.innerHTML = this.cameras.map((cam, idx) => {
+      const pos = layout.positions.find(p => p.camera_id === cam.id) || {
+        camera_id: cam.id,
+        x: 0,
+        y: 0,
+        width: 0.5,
+        height: 0.5,
+        z_index: idx
+      };
+
+      return `
+        <div class="camera-position-editor" data-camera-id="${cam.id}">
+          <h4>${cam.name}</h4>
+          <div class="position-inputs">
+            <label>
+              X (0-1):
+              <input type="number" step="0.01" min="0" max="1" value="${pos.x}" data-field="x" />
+            </label>
+            <label>
+              Y (0-1):
+              <input type="number" step="0.01" min="0" max="1" value="${pos.y}" data-field="y" />
+            </label>
+            <label>
+              Width (0-1):
+              <input type="number" step="0.01" min="0" max="1" value="${pos.width}" data-field="width" />
+            </label>
+            <label>
+              Height (0-1):
+              <input type="number" step="0.01" min="0" max="1" value="${pos.height}" data-field="height" />
+            </label>
+            <label>
+              Z-Index:
+              <input type="number" step="1" value="${pos.z_index}" data-field="z_index" />
+            </label>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  handleLayoutTypeChange(newType) {
+    const nameInput = document.getElementById('layout-name-input');
+    const layout = {
+      name: nameInput.value || 'New Layout',
+      layout_type: newType,
+      positions: []
+    };
+
+    if (newType === 'pip') {
+      // Auto-generate PIP layout
+      layout.positions = this.generatePIPLayout();
+    }
+
+    this.renderCameraPositionEditors(layout);
+  }
+
+  generatePIPLayout() {
+    if (this.cameras.length === 0) return [];
+
+    const positions = [];
+
+    // First camera is main view (full screen)
+    positions.push({
+      camera_id: this.cameras[0].id,
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      z_index: 0
+    });
+
+    // Rest are picture-in-picture in bottom-right corner
+    const pipWidth = 0.25;
+    const pipHeight = 0.25;
+    const margin = 0.02;
+
+    for (let i = 1; i < this.cameras.length; i++) {
+      const row = Math.floor((i - 1) / 3);
+      const col = (i - 1) % 3;
+
+      positions.push({
+        camera_id: this.cameras[i].id,
+        x: 1 - (pipWidth + margin) * (col + 1),
+        y: 1 - (pipHeight + margin) * (row + 1),
+        width: pipWidth,
+        height: pipHeight,
+        z_index: i
+      });
+    }
+
+    return positions;
+  }
+
+  async saveCurrentLayout() {
+    const nameInput = document.getElementById('layout-name-input');
+    const typeSelect = document.getElementById('layout-type-select');
+    const layoutName = nameInput.value.trim() || 'New Layout';
+    const layoutType = typeSelect.value;
+
+    const positions = [];
+
+    if (layoutType !== 'grid') {
+      // Collect positions from editor inputs
+      document.querySelectorAll('.camera-position-editor').forEach(editor => {
+        const cameraId = editor.dataset.cameraId;
+        const inputs = editor.querySelectorAll('input');
+
+        const pos = {
+          camera_id: cameraId,
+          x: parseFloat(inputs[0].value) || 0,
+          y: parseFloat(inputs[1].value) || 0,
+          width: parseFloat(inputs[2].value) || 0.5,
+          height: parseFloat(inputs[3].value) || 0.5,
+          z_index: parseInt(inputs[4].value) || 0
+        };
+
+        positions.push(pos);
+      });
+    }
+
+    const newLayout = {
+      name: layoutName,
+      layout_type: layoutType,
+      positions: positions
+    };
+
+    // Update or add layout
+    const existingIndex = this.layouts.findIndex(l => l.name === layoutName);
+    if (existingIndex >= 0) {
+      this.layouts[existingIndex] = newLayout;
+    } else {
+      this.layouts.push(newLayout);
+    }
+
+    // Save to config
+    const config = await invoke("get_config");
+    config.layouts = this.layouts;
+    await invoke("save_config", { config });
+
+    this.closeLayoutEditor();
+  }
+
+  async applyCurrentLayout() {
+    await this.saveCurrentLayout();
+
+    const nameInput = document.getElementById('layout-name-input');
+    const layoutName = nameInput.value.trim() || 'New Layout';
+
+    this.activeLayout = layoutName;
+    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
+    this.layoutMode = currentLayout?.layout_type || 'grid';
+
+    // Save active layout to config
+    const config = await invoke("get_config");
+    config.active_layout = this.activeLayout;
+    await invoke("save_config", { config });
+
+    this.render();
+    this.closeLayoutEditor();
   }
 }
 
