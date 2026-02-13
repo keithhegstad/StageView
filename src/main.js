@@ -134,6 +134,20 @@ class StageView {
         this.updateHealthDisplay();
       });
 
+      // Listen for stream errors
+      this.unlistenStreamError = await listen("stream-error", (event) => {
+        const { camera_id, error, encoder } = event.payload;
+        const camera = this.cameras.find(c => c.id === camera_id);
+        const cameraName = camera ? camera.name : camera_id;
+
+        this.showToast(
+          `${cameraName}: ${error}. Try selecting a different encoder in settings.`,
+          'error'
+        );
+
+        console.error(`Stream error for ${cameraName}:`, error, `(encoder: ${encoder})`);
+      });
+
       this.render();
       this.startShuffleTimer();
 

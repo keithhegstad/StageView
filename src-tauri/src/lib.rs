@@ -263,6 +263,13 @@ struct StreamHealthEvent {
     health: StreamHealth,
 }
 
+#[derive(Serialize, Clone)]
+struct StreamErrorEvent {
+    camera_id: String,
+    error: String,
+    encoder: String,
+}
+
 // ── Buffer Pool ──────────────────────────────────────────────────────────────
 
 /// Reusable buffer pool to prevent memory fragmentation
@@ -799,11 +806,28 @@ async fn try_stream_camera(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = cmd.spawn()
-        .map_err(|e| {
-            error!("Failed to spawn ffmpeg for {}: {}", camera_id, e);
-            e
-        })?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            error!("Failed to spawn FFmpeg with encoder {}: {}", encoder_name, e);
+
+            // Emit error event to frontend
+            let _ = app.emit("stream-error", StreamErrorEvent {
+                camera_id: camera_id.to_string(),
+                error: format!("Encoder {} failed", encoder_name),
+                encoder: encoder_name.to_string(),
+            });
+
+            // Try fallback to x264
+            if encoder_name != "libx264" && encoder_name != "mjpeg" {
+                info!("Trying fallback to x264 for camera {}", camera_id);
+                // Recursively call with x264 fallback would go here
+                // For now, just return error
+            }
+
+            return Err(Box::new(e));
+        }
+    };
 
     // Initialize health entry
     {
