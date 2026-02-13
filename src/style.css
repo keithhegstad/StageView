@@ -1147,6 +1147,133 @@ select option {
   border-color: var(--text-dim);
 }
 
+/* ── PIP Editor ───────────────────────────────────────────────────────────── */
+
+.pip-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pip-main-camera {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pip-main-camera label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.pip-main-camera select {
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+.pip-main-camera select:focus {
+  border-color: var(--accent);
+}
+
+#pip-overlays-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pip-overlay-item {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.pip-overlay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.pip-overlay-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.pip-overlay-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pip-overlay-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pip-overlay-camera,
+.pip-overlay-size {
+  padding: 6px 10px;
+  background: #1a1a1a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.pip-overlay-camera:focus,
+.pip-overlay-size:focus {
+  border-color: var(--accent);
+}
+
+.corner-selector {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.corner-selector button {
+  padding: 10px;
+  background: #1a1a1a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.corner-selector button:hover {
+  background: #2a2a2a;
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.corner-selector button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.pip-overlay-remove {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 /* ── Camera Presets ───────────────────────────────────────────────────────── */
 
 .preset-controls {
