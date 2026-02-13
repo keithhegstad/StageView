@@ -49,6 +49,8 @@ class StageView {
     this.presets = [];
     this.draggedTile = null;
     this.dragStartIndex = null;
+    this.previousHealthValues = new Map(); // stores previous health values for change detection
+    this.pulseTimeouts = new Map(); // stores timeout IDs for pulse animations
     this.init();
   }
 
@@ -737,9 +739,21 @@ class StageView {
     const container = document.getElementById("health-stats-container");
     if (!container) return; // Settings panel not open
 
-    // Initialize previous values storage if not exists
-    if (!this.previousHealthValues) {
-      this.previousHealthValues = new Map();
+    // Constants for magic numbers
+    const PULSE_ANIMATION_DURATION = 300;
+    const MBPS_THRESHOLD_KBPS = 1000;
+
+    // Clean up stale camera data from previousHealthValues
+    const currentCameraIds = new Set(this.healthStats.keys());
+    for (const cameraId of this.previousHealthValues.keys()) {
+      if (!currentCameraIds.has(cameraId)) {
+        this.previousHealthValues.delete(cameraId);
+        // Also clean up any pending pulse timeouts for removed cameras
+        if (this.pulseTimeouts.has(cameraId)) {
+          clearTimeout(this.pulseTimeouts.get(cameraId));
+          this.pulseTimeouts.delete(cameraId);
+        }
+      }
     }
 
     this.healthStats.forEach((health, cameraId) => {
@@ -767,7 +781,7 @@ class StageView {
       // Update Bitrate with Mbps conversion
       const bitrateKbps = health.bitrate_kbps;
       let bitrateText;
-      if (bitrateKbps > 1000) {
+      if (bitrateKbps > MBPS_THRESHOLD_KBPS) {
         const bitrateMbps = Math.round(bitrateKbps / 10) / 100;
         bitrateText = `${bitrateMbps.toFixed(2)} Mbps`;
       } else {
@@ -807,10 +821,17 @@ class StageView {
 
       // Apply pulse animation if any value changed
       if (hasChanged) {
+        // Clear existing timeout if any to prevent timeout accumulation
+        if (this.pulseTimeouts.has(cameraId)) {
+          clearTimeout(this.pulseTimeouts.get(cameraId));
+        }
+
         card.classList.add('pulse');
-        setTimeout(() => {
+        const timeoutId = setTimeout(() => {
           card.classList.remove('pulse');
-        }, 300);
+          this.pulseTimeouts.delete(cameraId);
+        }, PULSE_ANIMATION_DURATION);
+        this.pulseTimeouts.set(cameraId, timeoutId);
       }
 
       // Store current values for next comparison
