@@ -19,6 +19,33 @@ pub struct Camera {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CameraPosition {
+    pub camera_id: String,
+    pub x: f32,      // 0.0 - 1.0 (percentage of viewport width)
+    pub y: f32,      // 0.0 - 1.0 (percentage of viewport height)
+    pub width: f32,  // 0.0 - 1.0 (percentage of viewport width)
+    pub height: f32, // 0.0 - 1.0 (percentage of viewport height)
+    pub z_index: i32, // For picture-in-picture layering
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LayoutConfig {
+    pub name: String,
+    pub layout_type: String, // "grid", "custom", "pip"
+    pub positions: Vec<CameraPosition>,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            name: "Default Grid".into(),
+            layout_type: "grid".into(),
+            positions: vec![],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub cameras: Vec<Camera>,
     pub shuffle_interval_secs: u64,
@@ -30,11 +57,16 @@ pub struct AppConfig {
     pub quality: String,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    #[serde(default)]
+    pub layouts: Vec<LayoutConfig>,
+    #[serde(default = "default_active_layout")]
+    pub active_layout: String, // Name of active layout
 }
 
 fn default_true() -> bool { true }
 fn default_quality() -> String { "medium".into() }
 fn default_api_port() -> u16 { 8090 }
+fn default_active_layout() -> String { "Default Grid".into() }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -45,6 +77,8 @@ impl Default for AppConfig {
             show_camera_names: true,
             quality: "medium".into(),
             api_port: 8090,
+            layouts: vec![LayoutConfig::default()],
+            active_layout: "Default Grid".into(),
         }
     }
 }
