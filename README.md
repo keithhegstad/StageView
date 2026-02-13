@@ -199,7 +199,7 @@ ip addr show
 
 All endpoints respond with JSON and use GET requests.
 
-**Base URL:** `http://YOUR_IP:8090/api/`
+**Base URL:** `http://YOUR_IP:8090`
 
 #### 1. Solo Camera
 ```
