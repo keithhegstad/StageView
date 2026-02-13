@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -28,14 +28,43 @@ pub struct CameraPosition {
     pub z_index: i32, // For picture-in-picture layering
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Corner position for picture-in-picture overlay
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Corner {
+    TL,
+    TR,
+    BL,
+    BR,
+}
+
+/// Custom deserializer for size_percent to enforce 10-40 range
+fn deserialize_size_percent<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u8::deserialize(deserializer)?;
+    if (10..=40).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "size_percent must be between 10 and 40, got {}",
+            value
+        )))
+    }
+}
+
+/// Picture-in-picture overlay configuration
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PipOverlay {
     pub camera_id: String,
-    pub corner: String,  // "TL", "TR", "BL", "BR"
+    pub corner: Corner,
+    #[serde(deserialize_with = "deserialize_size_percent")]
     pub size_percent: u8, // 10-40
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Picture-in-picture layout configuration
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PipConfig {
     pub main_camera_id: String,
     pub overlays: Vec<PipOverlay>,
@@ -687,6 +716,103 @@ fn load_config() -> (AppConfig, String) {
         .unwrap_or_default();
 
     (config, path_str)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_corner_serialization() {
+        let corner = Corner::TL;
+        let json = serde_json::to_string(&corner).unwrap();
+        assert_eq!(json, r#""TL""#);
+
+        let corner = Corner::BR;
+        let json = serde_json::to_string(&corner).unwrap();
+        assert_eq!(json, r#""BR""#);
+    }
+
+    #[test]
+    fn test_corner_deserialization() {
+        let corner: Corner = serde_json::from_str(r#""TL""#).unwrap();
+        assert!(matches!(corner, Corner::TL));
+
+        let corner: Corner = serde_json::from_str(r#""BR""#).unwrap();
+        assert!(matches!(corner, Corner::BR));
+    }
+
+    #[test]
+    fn test_corner_deserialization_invalid() {
+        let result: Result<Corner, _> = serde_json::from_str(r#""INVALID""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pip_overlay_valid_size() {
+        let json = r#"{
+            "camera_id": "cam1",
+            "corner": "TL",
+            "size_percent": 25
+        }"#;
+        let overlay: PipOverlay = serde_json::from_str(json).unwrap();
+        assert_eq!(overlay.camera_id, "cam1");
+        assert!(matches!(overlay.corner, Corner::TL));
+        assert_eq!(overlay.size_percent, 25);
+    }
+
+    #[test]
+    fn test_pip_overlay_size_too_small() {
+        let json = r#"{
+            "camera_id": "cam1",
+            "corner": "TL",
+            "size_percent": 5
+        }"#;
+        let result: Result<PipOverlay, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 10 and 40"));
+    }
+
+    #[test]
+    fn test_pip_overlay_size_too_large() {
+        let json = r#"{
+            "camera_id": "cam1",
+            "corner": "TL",
+            "size_percent": 50
+        }"#;
+        let result: Result<PipOverlay, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 10 and 40"));
+    }
+
+    #[test]
+    fn test_pip_config_serialization() {
+        let config = PipConfig {
+            main_camera_id: "main".to_string(),
+            overlays: vec![
+                PipOverlay {
+                    camera_id: "cam1".to_string(),
+                    corner: Corner::TL,
+                    size_percent: 20,
+                },
+                PipOverlay {
+                    camera_id: "cam2".to_string(),
+                    corner: Corner::BR,
+                    size_percent: 30,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: PipConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.main_camera_id, "main");
+        assert_eq!(parsed.overlays.len(), 2);
+        assert_eq!(parsed.overlays[0].camera_id, "cam1");
+        assert_eq!(parsed.overlays[1].size_percent, 30);
+    }
 }
 
 // ── App Entry ────────────────────────────────────────────────────────────────
