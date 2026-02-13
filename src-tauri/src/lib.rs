@@ -452,6 +452,151 @@ fn delete_preset(state: State<AppState>, name: String) -> Result<(), String> {
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
+// ── Encoder Selection and Command Building ──────────────────────────────────
+
+fn select_encoder(
+    config: &StreamConfig,
+    available: &AvailableEncoders,
+) -> (&'static str, Vec<String>) {
+    match config.codec {
+        CodecType::MJPEG => ("mjpeg", build_mjpeg_args(&config.quality)),
+        CodecType::H264 => {
+            let encoder = match config.encoder {
+                EncoderType::Auto => select_best_h264_encoder(available),
+                EncoderType::Nvenc => "h264_nvenc",
+                EncoderType::QSV => "h264_qsv",
+                EncoderType::Videotoolbox => "h264_videotoolbox",
+                EncoderType::X264 => "libx264",
+                EncoderType::MJPEG => return ("mjpeg", build_mjpeg_args(&config.quality)),
+            };
+
+            (encoder, build_h264_args(encoder, &config.quality))
+        }
+    }
+}
+
+fn select_best_h264_encoder(available: &AvailableEncoders) -> &'static str {
+    if available.nvenc {
+        "h264_nvenc"
+    } else if available.qsv {
+        "h264_qsv"
+    } else if available.videotoolbox {
+        "h264_videotoolbox"
+    } else {
+        "libx264"
+    }
+}
+
+fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Encoder-specific args
+    match encoder {
+        "h264_nvenc" => {
+            args.extend([
+                "-c:v".to_string(),
+                "h264_nvenc".to_string(),
+                "-preset".to_string(),
+                "p4".to_string(),
+                "-tune".to_string(),
+                "ll".to_string(),
+                "-rc".to_string(),
+                "vbr".to_string(),
+            ]);
+        }
+        "h264_qsv" => {
+            args.extend([
+                "-c:v".to_string(),
+                "h264_qsv".to_string(),
+                "-preset".to_string(),
+                "medium".to_string(),
+                "-global_quality".to_string(),
+                "25".to_string(),
+            ]);
+        }
+        "h264_videotoolbox" => {
+            args.extend([
+                "-c:v".to_string(),
+                "h264_videotoolbox".to_string(),
+                "-profile:v".to_string(),
+                "high".to_string(),
+            ]);
+        }
+        "libx264" => {
+            args.extend([
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "ultrafast".to_string(),
+                "-tune".to_string(),
+                "zerolatency".to_string(),
+            ]);
+        }
+        _ => {}
+    }
+
+    // Quality-specific args
+    match quality {
+        Quality::Low => {
+            args.extend([
+                "-vf".to_string(),
+                "scale=-2:720".to_string(),
+                "-r".to_string(),
+                "5".to_string(),
+                "-crf".to_string(),
+                "28".to_string(),
+            ]);
+        }
+        Quality::Medium => {
+            args.extend([
+                "-vf".to_string(),
+                "scale=-2:1080".to_string(),
+                "-r".to_string(),
+                "10".to_string(),
+                "-crf".to_string(),
+                "23".to_string(),
+            ]);
+        }
+        Quality::High => {
+            args.extend([
+                "-r".to_string(),
+                "15".to_string(),
+                "-crf".to_string(),
+                "18".to_string(),
+            ]);
+        }
+    }
+
+    // Output format
+    args.extend([
+        "-f".to_string(),
+        "h264".to_string(),
+        "-an".to_string(),
+    ]);
+
+    args
+}
+
+fn build_mjpeg_args(quality: &Quality) -> Vec<String> {
+    let (fps, q_val) = match quality {
+        Quality::Low => (5, 10),
+        Quality::Medium => (10, 5),
+        Quality::High => (15, 3),
+    };
+
+    vec![
+        "-vf".to_string(),
+        format!("fps={}", fps),
+        "-c:v".to_string(),
+        "mjpeg".to_string(),
+        "-q:v".to_string(),
+        q_val.to_string(),
+        "-f".to_string(),
+        "image2pipe".to_string(),
+        "-an".to_string(),
+    ]
+}
+
 /// Calculate smart backoff duration based on attempt number.
 /// Strategy: Fast retries initially (1-16s exponential), then 60s for medium-term issues,
 /// then 5min for long outages. Never gives up for 24/7 reliability.
@@ -532,7 +677,7 @@ async fn try_stream_camera(
     ffmpeg_path: &PathBuf,
     camera_id: &str,
     url: &str,
-    quality: &str,
+    _quality: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start_time = std::time::Instant::now();
     let mut frame_count: u64 = 0;
@@ -576,29 +721,32 @@ async fn try_stream_camera(
         url.to_string()
     };
 
-    // Quality presets: fps, jpeg quality (lower = better), scale
-    let (fps, q_v, scale) = match quality {
-        "low"  => ("5",  "10", Some("scale='min(640,iw)':-2")),
-        "high" => ("15", "3",  None),
-        _      => ("10", "5",  None), // medium (default)
+    // Add input URL
+    args.extend(["-i".into(), input_url]);
+
+    // Get stream config
+    let stream_config = {
+        let cfg = state.config.lock().unwrap();
+        cfg.stream_config.clone()
     };
 
-    let mut vf_parts: Vec<String> = Vec::new();
-    if let Some(s) = scale {
-        vf_parts.push(s.to_string());
-    }
-    vf_parts.push(format!("fps={}", fps));
-    let vf = vf_parts.join(",");
+    // Get available encoders
+    let available = {
+        let enc = state.available_encoders.lock().expect("available_encoders mutex poisoned");
+        enc.clone()
+    };
 
-    args.extend([
-        "-i".into(),   input_url,
-        "-vf".into(),  vf,
-        "-f".into(),   "image2pipe".into(),
-        "-c:v".into(), "mjpeg".into(),
-        "-q:v".into(), q_v.into(),
-        "-an".into(),
-        "pipe:1".into(),
-    ]);
+    // Select encoder and build args
+    let (encoder_name, codec_args) = select_encoder(&stream_config, &available);
+    debug!("Using encoder: {} for camera {}", encoder_name, camera_id);
+
+    // Add codec-specific args
+    for arg in codec_args {
+        args.push(arg);
+    }
+
+    // Add output
+    args.push("pipe:1".to_string());
 
     debug!("ffmpeg args: {}", args.join(" "));
 
