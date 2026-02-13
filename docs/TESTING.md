@@ -24,12 +24,14 @@
 - [ ] Uptime shows hours:minutes:seconds format
 - [ ] Stats persist when settings panel is closed and reopened
 
-### Custom Layouts
-- [ ] Grid layout arranges cameras in square grid
-- [ ] Custom layout positions cameras at specified x/y coordinates
-- [ ] PIP layout shows main camera full screen with overlays
-- [ ] Z-index controls layering correctly
-- [ ] Layout persists after app restart
+### Layout Modes
+- [ ] Auto Grid arranges cameras in square grid automatically
+- [ ] PIP shows main camera full-screen
+- [ ] PIP overlays position correctly in corners (TL/TR/BL/BR)
+- [ ] PIP overlay sizes scale correctly (10-40%)
+- [ ] Corner conflict detection prevents duplicates
+- [ ] Legacy custom layouts migrate to grid automatically
+- [ ] Migration notification shown once
 
 ### Layout Editor
 - [ ] Layout editor opens via toolbar button

@@ -27,8 +27,9 @@ HTTP API for hardware integration (Stream Deck, Elgato, Companion):
 
 ### Advanced Features
 - **Auto-Reconnection** - Streams automatically reconnect with exponential backoff
-- **Stream Health Monitoring** - Real-time FPS, bitrate, uptime per camera
-- **Custom Layouts** - Picture-in-picture, custom positioning, grid
+- **Stream Health Monitoring** - Real-time FPS, bitrate, uptime with modern UI
+- **Auto Grid Layout** - Automatically arranges cameras in optimal square grid
+- **Picture-in-Picture** - Main camera with corner overlays (TL/TR/BL/BR) at custom sizes
 - **Camera Presets** - Save and load camera configurations instantly
 - **Drag-and-Drop** - Reorder cameras in grid mode
 - **Multi-Monitor** - Window position/size persists across sessions
@@ -137,6 +138,31 @@ Example `config.json`:
   "api_port": 8090
 }
 ```
+
+## Layout Modes
+
+StageView offers two layout modes:
+
+### Auto Grid
+Automatically arranges cameras in an optimal square grid. No configuration needed - just add cameras and they'll be arranged automatically.
+
+### Picture-in-Picture (PIP)
+Display one main camera full-screen with smaller camera overlays in the corners.
+
+**Setup:**
+1. Click Layout Editor (🎨 button)
+2. Select "Picture-in-Picture"
+3. Choose main camera for full-screen background
+4. Add overlays:
+   - Select camera
+   - Choose corner (TL/TR/BL/BR)
+   - Select size (10-40%)
+5. Click "Apply Now"
+
+**Limitations:**
+- Each corner can have maximum 1 overlay
+- Main camera fills entire screen
+- Overlays positioned at 2% margin from edges
 
 ## Usage
 
