@@ -14,6 +14,72 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 // ── Data Models ──────────────────────────────────────────────────────────────
 
+// ── Codec Configuration ──────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodecType {
+    H264,
+    MJPEG,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum EncoderType {
+    Auto,         // Try hardware, fallback to software
+    Nvenc,        // Force NVIDIA
+    QSV,          // Force Intel
+    VideoToolbox, // Force macOS
+    X264,         // Force software H.264
+    MJPEG,        // Force MJPEG
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    Low,     // 720p max, 5 fps
+    Medium,  // 1080p max, 10 fps
+    High,    // Original, 15 fps
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StreamConfig {
+    pub codec: CodecType,
+    pub encoder: EncoderType,
+    pub quality: Quality,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            codec: CodecType::MJPEG,      // Backward compatible
+            encoder: EncoderType::MJPEG,
+            quality: Quality::Medium,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AvailableEncoders {
+    pub nvenc: bool,
+    pub qsv: bool,
+    pub videotoolbox: bool,
+    pub x264: bool,  // Always true
+}
+
+impl Default for AvailableEncoders {
+    fn default() -> Self {
+        Self {
+            nvenc: false,
+            qsv: false,
+            videotoolbox: false,
+            x264: true,
+        }
+    }
+}
+
+// ── Camera and Layout Models ─────────────────────────────────────────────────
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Camera {
     pub id: String,
@@ -125,7 +191,7 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub show_camera_names: bool,
     #[serde(default = "default_quality")]
-    pub quality: String,
+    pub quality: String,  // Deprecated, use stream_config.quality
     #[serde(default = "default_api_port")]
     pub api_port: u16,
     #[serde(default)]
@@ -136,6 +202,8 @@ pub struct AppConfig {
     pub presets: Vec<CameraPreset>,
     #[serde(default)]
     pub window_state: WindowState,
+    #[serde(default)]
+    pub stream_config: StreamConfig,
 }
 
 fn default_true() -> bool { true }
@@ -156,6 +224,7 @@ impl Default for AppConfig {
             active_layout: "Default Grid".into(),
             presets: vec![],
             window_state: WindowState::default(),
+            stream_config: StreamConfig::default(),
         }
     }
 }
@@ -240,6 +309,7 @@ struct AppState {
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
     stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
     buffer_pool: BufferPool, // Reusable buffer pool for frame processing
+    available_encoders: Mutex<AvailableEncoders>,
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -951,6 +1021,7 @@ pub fn run() {
                 // Pool of 32 buffers: allows 2 buffers per camera for up to 16 simultaneous streams
                 // (one being filled, one being encoded) with room for temporary spikes
                 buffer_pool: BufferPool::new(32),
+                available_encoders: Mutex::new(AvailableEncoders::default()),
             });
 
             // Restore window position and size
