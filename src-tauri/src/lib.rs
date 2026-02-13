@@ -414,12 +414,10 @@ async fn stream_camera(
         };
 
         // Emit status event before attempting connection
-        if attempt == 1 {
-            let _ = app.emit("camera-status", CameraStatusEvent {
-                camera_id: camera_id.clone(),
-                status: "connecting".to_string(),
-            });
-        }
+        let _ = app.emit("camera-status", CameraStatusEvent {
+            camera_id: camera_id.clone(),
+            status: "connecting".to_string(),
+        });
 
         // Attempt to stream
         let state = app.state::<AppState>();
