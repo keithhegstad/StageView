@@ -737,6 +737,11 @@ class StageView {
     const container = document.getElementById("health-stats-container");
     if (!container) return; // Settings panel not open
 
+    // Initialize previous values storage if not exists
+    if (!this.previousHealthValues) {
+      this.previousHealthValues = new Map();
+    }
+
     this.healthStats.forEach((health, cameraId) => {
       const card = container.querySelector(`[data-camera-id="${cameraId}"]`);
       if (!card) return;
@@ -746,15 +751,75 @@ class StageView {
       const framesEl = card.querySelector('[data-metric="frames"]');
       const uptimeEl = card.querySelector('[data-metric="uptime"]');
 
-      if (fpsEl) fpsEl.textContent = health.fps.toFixed(1);
-      if (bitrateEl) bitrateEl.textContent = `${health.bitrate_kbps.toFixed(0)} kbps`;
-      if (framesEl) framesEl.textContent = health.frame_count.toLocaleString();
-      if (uptimeEl) {
-        const hours = Math.floor(health.uptime_secs / 3600);
-        const mins = Math.floor((health.uptime_secs % 3600) / 60);
-        const secs = health.uptime_secs % 60;
-        uptimeEl.textContent = `${hours}h ${mins}m ${secs}s`;
+      // Get previous values for this camera
+      const prevValues = this.previousHealthValues.get(cameraId) || {};
+      let hasChanged = false;
+
+      // Update FPS
+      const fpsValue = health.fps.toFixed(1);
+      if (fpsEl) {
+        if (prevValues.fps !== fpsValue) {
+          fpsEl.textContent = fpsValue;
+          hasChanged = true;
+        }
       }
+
+      // Update Bitrate with Mbps conversion
+      const bitrateKbps = health.bitrate_kbps;
+      let bitrateText;
+      if (bitrateKbps > 1000) {
+        const bitrateMbps = Math.round(bitrateKbps / 10) / 100;
+        bitrateText = `${bitrateMbps.toFixed(2)} Mbps`;
+      } else {
+        bitrateText = `${bitrateKbps.toFixed(0)} kbps`;
+      }
+      if (bitrateEl) {
+        if (prevValues.bitrate !== bitrateText) {
+          bitrateEl.textContent = bitrateText;
+          hasChanged = true;
+        }
+      }
+
+      // Update Frames
+      const framesValue = health.frame_count.toLocaleString();
+      if (framesEl) {
+        if (prevValues.frames !== framesValue) {
+          framesEl.textContent = framesValue;
+          hasChanged = true;
+        }
+      }
+
+      // Update Uptime with simplified format (hours and minutes only)
+      const hours = Math.floor(health.uptime_secs / 3600);
+      const mins = Math.floor((health.uptime_secs % 3600) / 60);
+      let uptimeText;
+      if (hours > 0) {
+        uptimeText = `${hours}h ${mins}m`;
+      } else {
+        uptimeText = `${mins}m`;
+      }
+      if (uptimeEl) {
+        if (prevValues.uptime !== uptimeText) {
+          uptimeEl.textContent = uptimeText;
+          hasChanged = true;
+        }
+      }
+
+      // Apply pulse animation if any value changed
+      if (hasChanged) {
+        card.classList.add('pulse');
+        setTimeout(() => {
+          card.classList.remove('pulse');
+        }, 300);
+      }
+
+      // Store current values for next comparison
+      this.previousHealthValues.set(cameraId, {
+        fps: fpsValue,
+        bitrate: bitrateText,
+        frames: framesValue,
+        uptime: uptimeText
+      });
     });
   }
 
