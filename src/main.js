@@ -200,6 +200,8 @@ class StageView {
     // Render based on layout mode
     if (this.layoutMode === "grid") {
       this.renderGridLayout(grid);
+    } else if (this.layoutMode === "pip") {
+      this.renderPipLayout(grid);
     } else {
       this.renderCustomLayout(grid);
     }
@@ -256,6 +258,95 @@ class StageView {
       })
       .join("");
 
+    this.bindTileEvents(grid);
+  }
+
+  renderPipLayout(grid) {
+    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
+    if (!currentLayout || !currentLayout.pip_config) {
+      // Fallback to grid if no PIP config
+      this.renderGridLayout(grid);
+      return;
+    }
+
+    const pipConfig = currentLayout.pip_config;
+
+    // For PIP layouts, use absolute positioning
+    grid.style.gridTemplateColumns = "";
+    grid.style.gridTemplateRows = "";
+    grid.style.position = "relative";
+
+    // Define corner position mappings (2% margin from edges)
+    const positions = {
+      TL: { left: '2%', top: '2%' },
+      TR: { right: '2%', top: '2%' },
+      BL: { left: '2%', bottom: '2%' },
+      BR: { right: '2%', bottom: '2%' }
+    };
+
+    let tiles = [];
+
+    // 1. Create main camera tile (100% width/height, z-index: 1)
+    const mainCamera = this.cameras.find(c => c.id === pipConfig.main_camera_id);
+    if (mainCamera) {
+      tiles.push(`
+        <div class="camera-tile" data-id="${mainCamera.id}" style="
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100%;
+          height: 100%;
+          z-index: 1;
+        ">
+          <div class="loading-spinner"></div>
+          <img />
+          <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
+          <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${mainCamera.name}</div>
+        </div>
+      `);
+    }
+
+    // 2. Create overlay tiles for each PIP overlay
+    pipConfig.overlays.forEach((overlay, idx) => {
+      const overlayCamera = this.cameras.find(c => c.id === overlay.camera_id);
+      if (!overlayCamera) return;
+
+      const corner = overlay.corner;
+      const cornerPos = positions[corner] || positions.BR; // Default to BR if corner not found
+      const size = `${overlay.size_percent}%`;
+
+      // Build position style string
+      let positionStyle = '';
+      if (cornerPos.left !== undefined) {
+        positionStyle += `left: ${cornerPos.left}; `;
+      }
+      if (cornerPos.right !== undefined) {
+        positionStyle += `right: ${cornerPos.right}; `;
+      }
+      if (cornerPos.top !== undefined) {
+        positionStyle += `top: ${cornerPos.top}; `;
+      }
+      if (cornerPos.bottom !== undefined) {
+        positionStyle += `bottom: ${cornerPos.bottom}; `;
+      }
+
+      tiles.push(`
+        <div class="camera-tile" data-id="${overlayCamera.id}" style="
+          position: absolute;
+          ${positionStyle}
+          width: ${size};
+          height: ${size};
+          z-index: ${10 + idx};
+        ">
+          <div class="loading-spinner"></div>
+          <img />
+          <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
+          <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${overlayCamera.name}</div>
+        </div>
+      `);
+    });
+
+    grid.innerHTML = tiles.join("");
     this.bindTileEvents(grid);
   }
 
