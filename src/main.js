@@ -105,6 +105,14 @@ class StageView {
         }
       });
 
+      // Listen for stream health updates
+      this.healthStats = new Map(); // camera_id -> health object
+      this.unlistenHealth = await listen("stream-health", (event) => {
+        const { camera_id, health } = event.payload;
+        this.healthStats.set(camera_id, health);
+        this.updateHealthDisplay();
+      });
+
       this.render();
       this.startShuffleTimer();
 
@@ -533,6 +541,81 @@ class StageView {
     document.getElementById("quality-select").value = this.quality;
     document.getElementById("api-port").value = this.apiPort;
     this.renderCameraList();
+    this.injectHealthSection();
+  }
+
+  injectHealthSection() {
+    const panel = document.querySelector("#settings .settings-body");
+    if (!panel) return;
+
+    // Remove existing health section if it exists
+    const existingHealth = document.getElementById("health-stats-container");
+    if (existingHealth) {
+      existingHealth.closest(".settings-section")?.remove();
+    }
+
+    // Create health section HTML
+    let healthHTML = `
+      <div class="settings-section">
+        <h3>Stream Health</h3>
+        <div id="health-stats-container">
+          ${this.cameras.map(cam => `
+            <div class="health-card" data-camera-id="${cam.id}">
+              <div class="health-camera-name">${cam.name}</div>
+              <div class="health-metrics">
+                <div class="health-metric">
+                  <span class="health-label">FPS:</span>
+                  <span class="health-value" data-metric="fps">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Bitrate:</span>
+                  <span class="health-value" data-metric="bitrate">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Frames:</span>
+                  <span class="health-value" data-metric="frames">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Uptime:</span>
+                  <span class="health-value" data-metric="uptime">--</span>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+
+    // Insert health section at the top of settings panel
+    panel.insertAdjacentHTML('afterbegin', healthHTML);
+
+    // Update health display with current stats
+    this.updateHealthDisplay();
+  }
+
+  updateHealthDisplay() {
+    const container = document.getElementById("health-stats-container");
+    if (!container) return; // Settings panel not open
+
+    this.healthStats.forEach((health, cameraId) => {
+      const card = container.querySelector(`[data-camera-id="${cameraId}"]`);
+      if (!card) return;
+
+      const fpsEl = card.querySelector('[data-metric="fps"]');
+      const bitrateEl = card.querySelector('[data-metric="bitrate"]');
+      const framesEl = card.querySelector('[data-metric="frames"]');
+      const uptimeEl = card.querySelector('[data-metric="uptime"]');
+
+      if (fpsEl) fpsEl.textContent = health.fps.toFixed(1);
+      if (bitrateEl) bitrateEl.textContent = `${health.bitrate_kbps.toFixed(0)} kbps`;
+      if (framesEl) framesEl.textContent = health.frame_count.toLocaleString();
+      if (uptimeEl) {
+        const hours = Math.floor(health.uptime_secs / 3600);
+        const mins = Math.floor((health.uptime_secs % 3600) / 60);
+        const secs = health.uptime_secs % 60;
+        uptimeEl.textContent = `${hours}h ${mins}m ${secs}s`;
+      }
+    });
   }
 
   closeSettings() {
