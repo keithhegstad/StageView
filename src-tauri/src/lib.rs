@@ -880,9 +880,12 @@ fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
         .join("StageView")
         .join("logs");
 
-    std::fs::create_dir_all(&log_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Warning: Failed to create logs directory at {}: {}. Logging may not work.",
+                  log_dir.display(), e);
+    }
 
-    // Daily rotation, keep 5 files
+    // Daily rotation (files kept indefinitely - manual cleanup recommended for 24/7 use)
     let file_appender = tracing_appender::rolling::daily(log_dir.clone(), "stageview.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
