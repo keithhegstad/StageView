@@ -50,7 +50,6 @@ class StageView {
     this.draggedTile = null;
     this.dragStartIndex = null;
     this.previousHealthValues = new Map(); // stores previous health values for change detection
-    this.pulseTimeouts = new Map(); // stores timeout IDs for pulse animations
     this.init();
   }
 
@@ -740,7 +739,6 @@ class StageView {
     if (!container) return; // Settings panel not open
 
     // Constants for magic numbers
-    const PULSE_ANIMATION_DURATION = 300;
     const MBPS_THRESHOLD_KBPS = 1000;
 
     // Clean up stale camera data from previousHealthValues
@@ -748,11 +746,6 @@ class StageView {
     for (const cameraId of this.previousHealthValues.keys()) {
       if (!currentCameraIds.has(cameraId)) {
         this.previousHealthValues.delete(cameraId);
-        // Also clean up any pending pulse timeouts for removed cameras
-        if (this.pulseTimeouts.has(cameraId)) {
-          clearTimeout(this.pulseTimeouts.get(cameraId));
-          this.pulseTimeouts.delete(cameraId);
-        }
       }
     }
 
@@ -817,21 +810,6 @@ class StageView {
           uptimeEl.textContent = uptimeText;
           hasChanged = true;
         }
-      }
-
-      // Apply pulse animation if any value changed
-      if (hasChanged) {
-        // Clear existing timeout if any to prevent timeout accumulation
-        if (this.pulseTimeouts.has(cameraId)) {
-          clearTimeout(this.pulseTimeouts.get(cameraId));
-        }
-
-        card.classList.add('pulse');
-        const timeoutId = setTimeout(() => {
-          card.classList.remove('pulse');
-          this.pulseTimeouts.delete(cameraId);
-        }, PULSE_ANIMATION_DURATION);
-        this.pulseTimeouts.set(cameraId, timeoutId);
       }
 
       // Store current values for next comparison
