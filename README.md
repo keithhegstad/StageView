@@ -25,6 +25,14 @@ HTTP API for hardware integration (Stream Deck, Elgato, Companion):
 - Return to grid view
 - Query camera status
 
+### Advanced Features
+- **Auto-Reconnection** - Streams automatically reconnect with exponential backoff
+- **Stream Health Monitoring** - Real-time FPS, bitrate, uptime per camera
+- **Custom Layouts** - Picture-in-picture, custom positioning, grid
+- **Camera Presets** - Save and load camera configurations instantly
+- **Drag-and-Drop** - Reorder cameras in grid mode
+- **Multi-Monitor** - Window position/size persists across sessions
+
 ## Installation
 
 ### Prerequisites
@@ -139,6 +147,7 @@ Example `config.json`:
 | **1-9** | Solo camera at that position |
 | **0 / ESC** | Return to grid view |
 | **F11 / F** | Toggle fullscreen |
+| **Ctrl+N** | Open new window (multi-monitor) |
 
 ### Remote Control API
 
