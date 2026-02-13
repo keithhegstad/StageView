@@ -46,6 +46,9 @@ class StageView {
     this.layouts = [];
     this.activeLayout = null;
     this.layoutMode = "grid"; // "grid", "custom", "pip"
+    this.presets = [];
+    this.draggedTile = null;
+    this.dragStartIndex = null;
     this.init();
   }
 
@@ -62,6 +65,7 @@ class StageView {
       this.apiPort = config.api_port || 8090;
       this.layouts = config.layouts || [];
       this.activeLayout = config.active_layout || "Default Grid";
+      this.presets = config.presets || [];
 
       // Determine layout mode
       const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
@@ -137,6 +141,7 @@ class StageView {
     this.bindUIEvents();
     this.bindKeys();
     this.updateToolbar();
+    this.setupWindowStatePersistence();
   }
 
   // ── UI Event Binding ───────────────────────────────────────────────────
@@ -266,7 +271,7 @@ class StageView {
 
   bindTileEvents(grid) {
     // Double-click a tile to solo it
-    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+    grid.querySelectorAll(".camera-tile").forEach((tile, idx) => {
       tile.addEventListener("dblclick", () => {
         const camId = tile.dataset.id;
         const idx = this.cameras.findIndex((c) => c.id === camId) + 1;
@@ -276,6 +281,15 @@ class StageView {
           this.exitSolo();
         }
       });
+
+      // Add drag-and-drop for grid mode only
+      if (this.layoutMode === "grid") {
+        tile.draggable = true;
+        tile.addEventListener("dragstart", (e) => this.handleDragStart(e, idx));
+        tile.addEventListener("dragover", (e) => this.handleDragOver(e));
+        tile.addEventListener("drop", (e) => this.handleDrop(e, idx));
+        tile.addEventListener("dragend", (e) => this.handleDragEnd(e));
+      }
     });
   }
 
@@ -620,6 +634,7 @@ class StageView {
     document.getElementById("api-port").value = this.apiPort;
     this.renderCameraList();
     this.injectHealthSection();
+    this.injectPresetSection();
   }
 
   injectHealthSection() {
@@ -669,6 +684,53 @@ class StageView {
 
     // Update health display with current stats
     this.updateHealthDisplay();
+  }
+
+  injectPresetSection() {
+    const panel = document.querySelector("#settings .settings-body");
+    if (!panel) return;
+
+    // Remove existing preset section if it exists
+    const existingPresets = document.getElementById("preset-list");
+    if (existingPresets) {
+      existingPresets.closest("section")?.remove();
+    }
+
+    // Create preset section HTML
+    const presetsHTML = `
+      <section>
+        <h3>Camera Presets</h3>
+        <div class="preset-controls">
+          <input type="text" id="preset-name-input" placeholder="Preset name" />
+          <button id="save-preset-btn" class="btn-primary">Save Current as Preset</button>
+        </div>
+        <div id="preset-list" class="preset-list">
+          ${this.presets.map(p => `
+            <div class="preset-item">
+              <span class="preset-name">${p.name}</span>
+              <div class="preset-actions">
+                <button class="btn-small" onclick="app.loadPreset('${p.name}')">Load</button>
+                <button class="btn-small btn-danger" onclick="app.deletePreset('${p.name}')">Delete</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+    `;
+
+    // Insert preset section after health section
+    const healthSection = panel.querySelector(".settings-section");
+    if (healthSection) {
+      healthSection.insertAdjacentHTML('afterend', presetsHTML);
+    } else {
+      panel.insertAdjacentHTML('afterbegin', presetsHTML);
+    }
+
+    // Attach save preset handler
+    const savePresetBtn = document.getElementById("save-preset-btn");
+    if (savePresetBtn) {
+      savePresetBtn.addEventListener("click", () => this.savePreset());
+    }
   }
 
   updateHealthDisplay() {
@@ -1005,6 +1067,135 @@ class StageView {
 
     this.render();
     this.closeLayoutEditor();
+  }
+
+  // ── Camera Presets ──────────────────────────────────────────────────────
+
+  async savePreset() {
+    const nameInput = document.getElementById("preset-name-input");
+    const name = nameInput.value.trim();
+
+    if (!name) {
+      alert("Please enter a preset name");
+      return;
+    }
+
+    try {
+      await invoke("save_preset", { name });
+      const config = await invoke("get_config");
+      this.presets = config.presets || [];
+      nameInput.value = "";
+      this.injectPresetSection(); // Refresh preset list
+    } catch (err) {
+      console.error("Failed to save preset:", err);
+      alert("Failed to save preset");
+    }
+  }
+
+  async loadPreset(name) {
+    try {
+      const cameras = await invoke("load_preset", { name });
+      this.cameras = cameras;
+      const config = await invoke("get_config");
+      config.cameras = cameras;
+      await invoke("save_config", { config });
+      await invoke("stop_streams");
+      this.render();
+      await invoke("start_streams");
+      this.closeSettings();
+    } catch (err) {
+      console.error("Failed to load preset:", err);
+      alert("Failed to load preset");
+    }
+  }
+
+  async deletePreset(name) {
+    if (!confirm(`Delete preset "${name}"?`)) return;
+
+    try {
+      await invoke("delete_preset", { name });
+      const config = await invoke("get_config");
+      this.presets = config.presets || [];
+      this.injectPresetSection(); // Refresh preset list
+    } catch (err) {
+      console.error("Failed to delete preset:", err);
+      alert("Failed to delete preset");
+    }
+  }
+
+  // ── Drag-and-Drop Reordering ───────────────────────────────────────────
+
+  handleDragStart(e, index) {
+    this.draggedTile = e.currentTarget;
+    this.dragStartIndex = index;
+    e.currentTarget.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  handleDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const target = e.currentTarget;
+    if (target !== this.draggedTile) {
+      target.classList.add("drag-over");
+    }
+  }
+
+  handleDrop(e, targetIndex) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.classList.remove("drag-over");
+
+    if (this.dragStartIndex !== targetIndex) {
+      const temp = this.cameras[this.dragStartIndex];
+      this.cameras[this.dragStartIndex] = this.cameras[targetIndex];
+      this.cameras[targetIndex] = temp;
+      this.render();
+      this.saveCameraOrder();
+    }
+  }
+
+  handleDragEnd(e) {
+    e.currentTarget.classList.remove("dragging");
+    document.querySelectorAll(".camera-tile").forEach(t => t.classList.remove("drag-over"));
+  }
+
+  async saveCameraOrder() {
+    const config = await invoke("get_config");
+    config.cameras = this.cameras;
+    await invoke("save_config", { config });
+  }
+
+  // ── Window State Persistence ────────────────────────────────────────────
+
+  async setupWindowStatePersistence() {
+    const currentWindow = getCurrentWindow();
+    let saveTimeout;
+
+    const saveWindowState = async () => {
+      clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(async () => {
+        try {
+          const position = await currentWindow.outerPosition();
+          const size = await currentWindow.outerSize();
+          const maximized = await currentWindow.isMaximized();
+          const config = await invoke("get_config");
+          config.window_state = {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            maximized
+          };
+          await invoke("save_config", { config });
+        } catch (err) {
+          console.error("Failed to save window state:", err);
+        }
+      }, 500);
+    };
+
+    await currentWindow.listen("tauri://resize", saveWindowState);
+    await currentWindow.listen("tauri://move", saveWindowState);
   }
 }
 

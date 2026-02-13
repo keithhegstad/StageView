@@ -46,6 +46,27 @@ impl Default for LayoutConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CameraPreset {
+    pub name: String,
+    pub cameras: Vec<Camera>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self { x: 100, y: 100, width: 1280, height: 720, maximized: false }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub cameras: Vec<Camera>,
     pub shuffle_interval_secs: u64,
@@ -61,6 +82,10 @@ pub struct AppConfig {
     pub layouts: Vec<LayoutConfig>,
     #[serde(default = "default_active_layout")]
     pub active_layout: String, // Name of active layout
+    #[serde(default)]
+    pub presets: Vec<CameraPreset>,
+    #[serde(default)]
+    pub window_state: WindowState,
 }
 
 fn default_true() -> bool { true }
@@ -79,6 +104,8 @@ impl Default for AppConfig {
             api_port: 8090,
             layouts: vec![LayoutConfig::default()],
             active_layout: "Default Grid".into(),
+            presets: vec![],
+            window_state: WindowState::default(),
         }
     }
 }
@@ -230,6 +257,40 @@ fn grid_view(state: State<AppState>, app: AppHandle) {
 #[tauri::command]
 fn get_stream_health(state: State<AppState>) -> HashMap<String, StreamHealth> {
     state.stream_health.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_preset(state: State<AppState>, name: String) -> Result<(), String> {
+    let mut config = state.config.lock().unwrap();
+    let preset = CameraPreset {
+        name: name.clone(),
+        cameras: config.cameras.clone(),
+    };
+    if let Some(idx) = config.presets.iter().position(|p| p.name == name) {
+        config.presets[idx] = preset;
+    } else {
+        config.presets.push(preset);
+    }
+    let json = serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())?;
+    std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_preset(state: State<AppState>, name: String) -> Result<Vec<Camera>, String> {
+    let config = state.config.lock().unwrap();
+    config.presets.iter().find(|p| p.name == name)
+        .map(|p| p.cameras.clone())
+        .ok_or("Preset not found".into())
+}
+
+#[tauri::command]
+fn delete_preset(state: State<AppState>, name: String) -> Result<(), String> {
+    let mut config = state.config.lock().unwrap();
+    config.presets.retain(|p| p.name != name);
+    let json = serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())?;
+    std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
@@ -648,6 +709,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(move |app| {
             let api_port = config.api_port;
+            let window_state = config.window_state.clone();
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 config_path,
@@ -656,6 +719,26 @@ pub fn run() {
                 reconnect_attempts: Mutex::new(HashMap::new()),
                 stream_health: Mutex::new(HashMap::new()),
             });
+
+            // Restore window position and size
+            if let Some(window) = app.get_webview_window("main") {
+                use tauri::Position;
+                use tauri::Size;
+
+                let _ = window.set_position(Position::Physical(tauri::PhysicalPosition {
+                    x: window_state.x,
+                    y: window_state.y,
+                }));
+
+                let _ = window.set_size(Size::Physical(tauri::PhysicalSize {
+                    width: window_state.width,
+                    height: window_state.height,
+                }));
+
+                if window_state.maximized {
+                    let _ = window.maximize();
+                }
+            }
 
             // Start the HTTP API server for remote control
             let app_handle = app.handle().clone();
@@ -673,6 +756,9 @@ pub fn run() {
             solo_camera,
             grid_view,
             get_stream_health,
+            save_preset,
+            load_preset,
+            delete_preset,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
