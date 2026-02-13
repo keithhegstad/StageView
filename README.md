@@ -248,6 +248,38 @@ Lists all cameras with their indices and API numbers.
 
 **Note:** The index numbers in the API response match the blue numbered badges shown in the settings panel next to each camera name.
 
+#### 4. Toggle Fullscreen
+```
+GET /api/fullscreen
+```
+Toggles the application fullscreen mode.
+
+**Example:** `http://192.168.1.100:8090/api/fullscreen`
+
+**Response:**
+```json
+{"ok": true, "action": "fullscreen", "state": "entered"}
+```
+
+**State values:**
+- `"entered"` - Fullscreen is now active
+- `"exited"` - Fullscreen is now inactive
+
+#### 5. Reload Configuration
+```
+GET /api/reload
+```
+Reloads the configuration from disk and refreshes the UI.
+
+**Example:** `http://192.168.1.100:8090/api/reload`
+
+**Response:**
+```json
+{"ok": true, "action": "reload"}
+```
+
+**Note:** This endpoint is useful for hot-reloading configuration changes during development or when managing config files externally.
+
 ### Integration Examples
 
 **Stream Deck:**
@@ -270,6 +302,12 @@ curl http://192.168.1.100:8090/api/grid
 
 # Get camera list with API indices
 curl http://192.168.1.100:8090/api/status
+
+# Toggle fullscreen
+curl http://192.168.1.100:8090/api/fullscreen
+
+# Reload configuration
+curl http://192.168.1.100:8090/api/reload
 ```
 
 ### Troubleshooting
