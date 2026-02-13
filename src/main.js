@@ -398,7 +398,7 @@ class StageView {
 
   bindTileEvents(grid) {
     // Double-click a tile to solo it
-    grid.querySelectorAll(".camera-tile").forEach((tile, idx) => {
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
       tile.addEventListener("dblclick", () => {
         const camId = tile.dataset.id;
         const idx = this.cameras.findIndex((c) => c.id === camId) + 1;
@@ -411,10 +411,13 @@ class StageView {
 
       // Add drag-and-drop for grid mode only
       if (this.layoutMode === "grid") {
+        const camId = tile.dataset.id;
+        const cameraIndex = this.cameras.findIndex((c) => c.id === camId);
+
         tile.draggable = true;
-        tile.addEventListener("dragstart", (e) => this.handleDragStart(e, idx));
+        tile.addEventListener("dragstart", (e) => this.handleDragStart(e, cameraIndex));
         tile.addEventListener("dragover", (e) => this.handleDragOver(e));
-        tile.addEventListener("drop", (e) => this.handleDrop(e, idx));
+        tile.addEventListener("drop", (e) => this.handleDrop(e, cameraIndex));
         tile.addEventListener("dragend", (e) => this.handleDragEnd(e));
       }
     });
@@ -1014,12 +1017,15 @@ class StageView {
     const entries = document.querySelectorAll("#camera-list .camera-entry");
     const cameras = [];
 
+    // Build a map of existing cameras by URL for ID preservation
+    const existingCamerasMap = new Map(this.cameras.map(c => [c.url, c.id]));
+
     entries.forEach((entry) => {
       const name = entry.querySelector('[data-field="name"]').value.trim();
       const url = entry.querySelector('[data-field="url"]').value.trim();
       if (url) {
         cameras.push({
-          id: crypto.randomUUID(),
+          id: existingCamerasMap.get(url) || crypto.randomUUID(),
           name: name || `Camera ${cameras.length + 1}`,
           url,
         });
