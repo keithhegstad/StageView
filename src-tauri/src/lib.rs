@@ -384,7 +384,10 @@ fn delete_preset(state: State<AppState>, name: String) -> Result<(), String> {
 /// then 5min for long outages. Never gives up for 24/7 reliability.
 fn calculate_backoff(attempt: u32) -> std::time::Duration {
     match attempt {
-        1..=5 => std::time::Duration::from_secs(2u64.pow(attempt.saturating_sub(1))),  // 1s, 2s, 4s, 8s, 16s
+        1..=5 => {
+            let exp = attempt.saturating_sub(1).min(31); // Cap at 2^31 to prevent overflow
+            std::time::Duration::from_secs(2u64.pow(exp))
+        },  // 1s, 2s, 4s, 8s, 16s
         6..=10 => std::time::Duration::from_secs(60),                                    // 60s
         _ => std::time::Duration::from_secs(300),                                        // 5 min for long outages
     }
@@ -433,20 +436,18 @@ async fn stream_camera(
 
         // Calculate backoff and emit reconnection status
         let backoff = calculate_backoff(attempt);
-        if attempt > 1 {
-            let status_msg = if attempt <= 10 {
-                format!("reconnecting (attempt {})", attempt)
-            } else {
-                format!("reconnecting ({}m wait)", backoff.as_secs() / 60)
-            };
+        let status_msg = if attempt <= 10 {
+            format!("reconnecting (attempt {})", attempt)
+        } else {
+            format!("reconnecting ({}m wait)", backoff.as_secs() / 60)
+        };
 
-            let _ = app.emit("camera-status", CameraStatusEvent {
-                camera_id: camera_id.clone(),
-                status: status_msg,
-            });
+        let _ = app.emit("camera-status", CameraStatusEvent {
+            camera_id: camera_id.clone(),
+            status: status_msg,
+        });
 
-            tokio::time::sleep(backoff).await;
-        }
+        tokio::time::sleep(backoff).await;
 
         eprintln!("[StageView] Retrying {} (attempt {})", camera_id, attempt + 1);
     }
@@ -590,18 +591,16 @@ async fn try_stream_camera(
                     frame_count += 1;
                     bytes_received += frame.len() as u64;
 
-                    // Reset reconnect counter on any successful frame
-                    {
-                        let mut attempts = state.reconnect_attempts.lock().unwrap();
-                        attempts.insert(camera_id.to_string(), 0);  // Reset to 0 on success
-                    }
-
                     if frame_count_local == 1 {
                         eprintln!(
                             "[StageView] First frame for {} ({} bytes)",
                             camera_id,
                             frame.len()
                         );
+
+                        // Reset reconnect counter on first frame only (avoid mutex contention)
+                        let mut attempts = state.reconnect_attempts.lock().unwrap();
+                        attempts.insert(camera_id.to_string(), 0);
 
                         let _ = app.emit(
                             "camera-status",
