@@ -970,7 +970,6 @@ fn get_ffmpeg_path() -> PathBuf {
 async fn detect_encoders() -> AvailableEncoders {
     use tokio::process::Command;
 
-    // Get FFmpeg path
     let ffmpeg_path = get_ffmpeg_path();
 
     let output = match Command::new(&ffmpeg_path)
@@ -978,8 +977,16 @@ async fn detect_encoders() -> AvailableEncoders {
         .output()
         .await
     {
-        Ok(output) => output,
-        Err(_) => return AvailableEncoders::default(),
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            error!("FFmpeg -encoders failed: {}",
+                   String::from_utf8_lossy(&output.stderr));
+            return AvailableEncoders::default();
+        }
+        Err(e) => {
+            error!("Failed to execute FFmpeg: {}", e);
+            return AvailableEncoders::default();
+        }
     };
 
     let encoders_str = String::from_utf8_lossy(&output.stdout);
@@ -988,13 +995,14 @@ async fn detect_encoders() -> AvailableEncoders {
         nvenc: encoders_str.contains("h264_nvenc"),
         qsv: encoders_str.contains("h264_qsv"),
         videotoolbox: encoders_str.contains("h264_videotoolbox"),
-        x264: true,  // libx264 always available
+        x264: true,
     }
 }
 
 #[tauri::command]
 async fn get_available_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
-    let encoders = state.available_encoders.lock().unwrap();
+    let encoders = state.available_encoders.lock()
+        .expect("available_encoders mutex poisoned");
     Ok(encoders.clone())
 }
 
@@ -1002,7 +1010,8 @@ async fn get_available_encoders(state: State<'_, AppState>) -> Result<AvailableE
 async fn refresh_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
     let encoders = detect_encoders().await;
     {
-        let mut stored = state.available_encoders.lock().unwrap();
+        let mut stored = state.available_encoders.lock()
+            .expect("available_encoders mutex poisoned");
         *stored = encoders.clone();
     }
     Ok(encoders)
@@ -1053,9 +1062,7 @@ pub fn run() {
     info!("Using ffmpeg at: {}", ffmpeg_path.display());
 
     // Detect available encoders at startup
-    let available_encoders = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(detect_encoders());
+    let available_encoders = tauri::async_runtime::block_on(detect_encoders());
 
     info!("Available encoders: nvenc={}, qsv={}, videotoolbox={}, x264={}",
           available_encoders.nvenc, available_encoders.qsv,
