@@ -2,7 +2,8 @@
 
 A lightweight, cross-platform multi-camera grid viewer built for professional live streaming and broadcast monitoring. Features intelligent burn-in protection, remote control API, and support for multiple streaming protocols.
 
-![StageView Screenshot](docs/screenshot.png)
+<!-- Screenshot will be added in future release -->
+<!-- ![StageView Screenshot](docs/screenshot.png) -->
 
 ## Features
 
@@ -150,13 +151,13 @@ Base URL: `http://localhost:8090` (or configured port)
 GET /api/solo/:index
 ```
 - `index`: 1-based camera position
-- Response: `{"status": "ok", "command": "solo", "index": 1}`
+- Response: `{"ok": true, "action": "solo", "index": 1}`
 
 **Grid View**
 ```http
 GET /api/grid
 ```
-- Response: `{"status": "ok", "command": "grid"}`
+- Response: `{"ok": true, "action": "grid"}`
 
 **Camera Status**
 ```http
@@ -165,6 +166,7 @@ GET /api/status
 - Response:
 ```json
 {
+  "ok": true,
   "cameras": [
     {"index": 1, "name": "Camera 1", "id": "abc123"},
     {"index": 2, "name": "Camera 2", "id": "def456"}
