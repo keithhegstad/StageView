@@ -102,6 +102,17 @@ button {
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
 }
 
+.camera-tile .camera-status.reconnecting {
+  background: orange;
+  box-shadow: 0 0 6px rgba(255, 165, 0, 0.5);
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .camera-tile .loading-spinner {
   position: absolute;
   top: 50%;

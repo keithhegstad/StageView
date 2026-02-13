@@ -178,8 +178,7 @@ fn grid_view(state: State<AppState>, app: AppHandle) {
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
-/// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
-/// and pushes each frame to the frontend as a base64-encoded Tauri event.
+/// Wrapper that retries streaming with exponential backoff on failure.
 async fn stream_camera(
     app: AppHandle,
     ffmpeg_path: PathBuf,
@@ -188,6 +187,73 @@ async fn stream_camera(
     quality: String,
 ) {
     eprintln!("[StageView] Starting stream for {} → {}", camera_id, url);
+
+    const BASE_DELAY_MS: u64 = 1000;
+    const MAX_DELAY_MS: u64 = 60000;
+    const MAX_ATTEMPTS: u32 = 10;
+
+    loop {
+        // Get current attempt count
+        let attempt = {
+            let state = app.state::<AppState>();
+            let mut attempts = state.reconnect_attempts.lock().unwrap();
+            let count = attempts.entry(camera_id.clone()).or_insert(0);
+            *count += 1;
+            *count
+        };
+
+        // Emit status event
+        let status = if attempt == 1 {
+            "connecting".to_string()
+        } else {
+            format!("reconnecting (attempt {})", attempt)
+        };
+        let _ = app.emit("camera-status", CameraStatusEvent {
+            camera_id: camera_id.clone(),
+            status,
+        });
+
+        // Attempt to stream
+        let state = app.state::<AppState>();
+        match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url, &quality).await {
+            Ok(()) => {
+                eprintln!("[StageView] Stream ended normally for {}", camera_id);
+                // Reset attempt counter on success
+                state.reconnect_attempts.lock().unwrap().insert(camera_id.clone(), 0);
+            }
+            Err(e) => {
+                eprintln!("[StageView] Stream failed for {}: {}", camera_id, e);
+            }
+        }
+
+        // Check if we should retry
+        if attempt >= MAX_ATTEMPTS {
+            eprintln!("[StageView] Max retry attempts ({}) reached for {}", MAX_ATTEMPTS, camera_id);
+            let _ = app.emit("camera-status", CameraStatusEvent {
+                camera_id: camera_id.clone(),
+                status: "error".into(),
+            });
+            break;
+        }
+
+        // Calculate backoff delay: min(BASE * 2^(attempt-1), MAX)
+        let delay_ms = (BASE_DELAY_MS * 2u64.pow(attempt - 1)).min(MAX_DELAY_MS);
+        eprintln!("[StageView] Retrying {} in {}ms (attempt {})", camera_id, delay_ms, attempt);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+    }
+}
+
+/// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
+/// and pushes each frame to the frontend as a base64-encoded Tauri event.
+async fn try_stream_camera(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+    ffmpeg_path: &PathBuf,
+    camera_id: &str,
+    url: &str,
+    quality: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
@@ -214,20 +280,20 @@ async fn stream_camera(
             "-rtsp_transport".into(),    "tcp".into(),
             "-allowed_media_types".into(),"video".into(),
         ]);
-        url.clone()
+        url.to_string()
     } else if url.starts_with("srt://") {
         args.extend([
             "-analyzeduration".into(), "10000000".into(),
             "-probesize".into(),       "10000000".into(),
         ]);
-        url.clone()
+        url.to_string()
     } else {
         // HTTP MJPEG, file, or other – pass through as-is
-        url.clone()
+        url.to_string()
     };
 
     // Quality presets: fps, jpeg quality (lower = better), scale
-    let (fps, q_v, scale) = match quality.as_str() {
+    let (fps, q_v, scale) = match quality {
         "low"  => ("5",  "10", Some("scale='min(640,iw)':-2")),
         "high" => ("15", "3",  None),
         _      => ("10", "5",  None), // medium (default)
@@ -252,7 +318,7 @@ async fn stream_camera(
 
     eprintln!("[StageView] ffmpeg args: {}", args.join(" "));
 
-    let mut cmd = Command::new(&ffmpeg_path);
+    let mut cmd = Command::new(ffmpeg_path);
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -265,18 +331,11 @@ async fn stream_camera(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = match cmd.spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
+    let mut child = cmd.spawn()
+        .map_err(|e| {
             eprintln!("[StageView] Failed to spawn ffmpeg for {}: {}", camera_id, e);
-            let _ = app.emit("camera-status", CameraStatusEvent {
-                camera_id,
-                status: "error".into(),
-            });
-            return;
-        }
-    };
+            e
+        })?;
 
     let mut stdout = child.stdout.take().unwrap();
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
@@ -290,7 +349,7 @@ async fn stream_camera(
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[StageView] Read error for {}: {}", camera_id, e);
-                break;
+                return Err(Box::new(e));
             }
         };
 
@@ -309,10 +368,14 @@ async fn stream_camera(
                             camera_id,
                             frame.len()
                         );
+
+                        // Reset attempt counter on first successful frame
+                        state.reconnect_attempts.lock().unwrap().insert(camera_id.to_string(), 0);
+
                         let _ = app.emit(
                             "camera-status",
                             CameraStatusEvent {
-                                camera_id: camera_id.clone(),
+                                camera_id: camera_id.to_string(),
                                 status: "online".into(),
                             },
                         );
@@ -321,7 +384,7 @@ async fn stream_camera(
                     let _ = app.emit(
                         "camera-frame",
                         FrameEvent {
-                            camera_id: camera_id.clone(),
+                            camera_id: camera_id.to_string(),
                             data: b64,
                         },
                     );
@@ -341,13 +404,8 @@ async fn stream_camera(
         "[StageView] Stream ended for {} after {} frames",
         camera_id, frame_count
     );
-    let _ = app.emit(
-        "camera-status",
-        CameraStatusEvent {
-            camera_id,
-            status: "offline".into(),
-        },
-    );
+
+    Ok(())
 }
 
 // ── Network Command API ──────────────────────────────────────────────────────

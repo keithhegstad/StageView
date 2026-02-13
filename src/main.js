@@ -72,19 +72,26 @@ class StageView {
         }
       });
 
-      // Listen for camera status events (online / offline / error)
+      // Listen for camera status events (online / offline / error / connecting / reconnecting)
       this.unlistenStatus = await listen("camera-status", (event) => {
         const { camera_id, status } = event.payload;
         const tile = document.querySelector(`[data-id="${camera_id}"]`);
         if (!tile) return;
         const spinner = tile.querySelector(".loading-spinner");
         const statusEl = tile.querySelector(".camera-status");
+
         if (status === "online") {
           spinner.style.display = "none";
+          statusEl.classList.remove("offline", "reconnecting");
+        } else if (status === "connecting" || status.startsWith("reconnecting")) {
+          spinner.style.display = "";
+          statusEl.classList.add("reconnecting");
           statusEl.classList.remove("offline");
         } else {
+          // "error" or "offline"
           spinner.style.display = "none";
           statusEl.classList.add("offline");
+          statusEl.classList.remove("reconnecting");
         }
       });
 
