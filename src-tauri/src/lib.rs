@@ -1175,11 +1175,64 @@ async fn detect_encoders() -> AvailableEncoders {
 
     let encoders_str = String::from_utf8_lossy(&output.stdout);
 
+    // Check if encoders are listed
+    let has_nvenc = encoders_str.contains("h264_nvenc");
+    let has_qsv = encoders_str.contains("h264_qsv");
+    let has_videotoolbox = encoders_str.contains("h264_videotoolbox");
+
+    info!("FFmpeg lists encoders - nvenc: {}, qsv: {}, videotoolbox: {}",
+          has_nvenc, has_qsv, has_videotoolbox);
+
+    // Test encoders that are listed
+    let ffmpeg_path_str = ffmpeg_path.to_string_lossy().to_string();
+
+    let nvenc_works = if has_nvenc {
+        test_encoder(&ffmpeg_path_str, "h264_nvenc").await
+    } else {
+        false
+    };
+
+    let qsv_works = if has_qsv {
+        test_encoder(&ffmpeg_path_str, "h264_qsv").await
+    } else {
+        false
+    };
+
+    let videotoolbox_works = if has_videotoolbox {
+        test_encoder(&ffmpeg_path_str, "h264_videotoolbox").await
+    } else {
+        false
+    };
+
+    info!("Encoder tests complete - nvenc: {}, qsv: {}, videotoolbox: {}",
+          nvenc_works, qsv_works, videotoolbox_works);
+
     AvailableEncoders {
-        nvenc: encoders_str.contains("h264_nvenc"),
-        qsv: encoders_str.contains("h264_qsv"),
-        videotoolbox: encoders_str.contains("h264_videotoolbox"),
+        nvenc: nvenc_works,
+        qsv: qsv_works,
+        videotoolbox: videotoolbox_works,
         x264: true,
+    }
+}
+
+async fn test_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
+    use tokio::process::Command;
+
+    // Quick test: encode 1 second of test video
+    let output = Command::new(ffmpeg_path)
+        .args([
+            "-f", "lavfi",
+            "-i", "testsrc=duration=1:size=320x240:rate=1",
+            "-c:v", encoder,
+            "-f", "null",
+            "-"
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(result) => result.status.success(),
+        Err(_) => false,
     }
 }
 
