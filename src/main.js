@@ -177,6 +177,32 @@ class StageView {
     document.getElementById('save-layout-btn').addEventListener('click', () => this.saveCurrentLayout());
     document.getElementById('apply-layout-btn').addEventListener('click', () => this.applyCurrentLayout());
     document.getElementById('layout-type-select').addEventListener('change', (e) => this.handleLayoutTypeChange(e.target.value));
+
+    // PIP editor event delegation (single listener for all dynamically added buttons)
+    const pipContainer = document.getElementById('layout-camera-list');
+    if (pipContainer) {
+      pipContainer.addEventListener('click', (e) => {
+        if (e.target.id === 'add-pip-overlay') {
+          this.addPipOverlay();
+        }
+        if (e.target.classList.contains('pip-overlay-remove')) {
+          const index = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
+          this.removePipOverlay(index);
+        }
+        if (e.target.matches('.corner-selector button')) {
+          const overlayIndex = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
+          const corner = e.target.dataset.corner;
+          this.selectCorner(overlayIndex, corner);
+        }
+      });
+
+      // Main camera selection change listener
+      pipContainer.addEventListener('change', (e) => {
+        if (e.target.id === 'pip-main-camera') {
+          this.validateMainCameraSelection();
+        }
+      });
+    }
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -1172,29 +1198,7 @@ class StageView {
 
     container.innerHTML = html;
 
-    // Use event delegation on the container instead of attaching individual listeners
-    container.addEventListener('click', (e) => {
-      if (e.target.id === 'add-pip-overlay') {
-        this.addPipOverlay();
-      }
-      if (e.target.classList.contains('pip-overlay-remove')) {
-        const index = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
-        this.removePipOverlay(index);
-      }
-      if (e.target.matches('.corner-selector button')) {
-        const overlayIndex = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
-        const corner = e.target.dataset.corner;
-        this.selectCorner(overlayIndex, corner);
-      }
-    });
-
-    // Add validation for main camera selection to prevent duplicates
-    const mainCameraSelect = document.getElementById('pip-main-camera');
-    if (mainCameraSelect) {
-      mainCameraSelect.addEventListener('change', () => {
-        this.validateMainCameraSelection();
-      });
-    }
+    // Event listeners are attached once in bindUIEvents() to prevent memory leaks
   }
 
   validateMainCameraSelection() {
