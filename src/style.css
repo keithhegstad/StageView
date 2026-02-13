@@ -1155,6 +1155,16 @@ select option {
   gap: 16px;
 }
 
+.pip-section-header {
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+
+.pip-add-button {
+  width: 100%;
+  margin-top: 12px;
+}
+
 .pip-main-camera {
   display: flex;
   flex-direction: column;

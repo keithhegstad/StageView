@@ -1122,44 +1122,24 @@ class StageView {
     this.renderCameraPositionEditors(layout);
   }
 
-  generatePIPLayout() {
-    if (this.cameras.length === 0) return [];
-
-    const positions = [];
-
-    // First camera is main view (full screen)
-    positions.push({
-      camera_id: this.cameras[0].id,
-      x: 0,
-      y: 0,
-      width: 1,
-      height: 1,
-      z_index: 0
-    });
-
-    // Rest are picture-in-picture in bottom-right corner
-    const pipWidth = 0.25;
-    const pipHeight = 0.25;
-    const margin = 0.02;
-
-    for (let i = 1; i < this.cameras.length; i++) {
-      const row = Math.floor((i - 1) / 3);
-      const col = (i - 1) % 3;
-
-      positions.push({
-        camera_id: this.cameras[i].id,
-        x: 1 - (pipWidth + margin) * (col + 1),
-        y: 1 - (pipHeight + margin) * (row + 1),
-        width: pipWidth,
-        height: pipHeight,
-        z_index: i
-      });
-    }
-
-    return positions;
-  }
 
   // ── PIP Editor Methods ──────────────────────────────────────────────────
+
+  getCurrentPipLayout() {
+    const nameInput = document.getElementById('layout-name-input');
+    const typeSelect = document.getElementById('layout-type-select');
+    const mainCameraId = document.getElementById('pip-main-camera').value;
+    const overlays = this.getActivePipOverlays();
+
+    return {
+      name: nameInput.value || 'New Layout',
+      layout_type: typeSelect.value,
+      pip_config: {
+        main_camera_id: mainCameraId,
+        overlays: overlays
+      }
+    };
+  }
 
   renderPipConfig(layout) {
     const container = document.getElementById('layout-camera-list');
@@ -1181,37 +1161,56 @@ class StageView {
           </select>
         </div>
 
-        <h4 style="margin-top: 20px; margin-bottom: 12px;">Overlays</h4>
+        <h4 class="pip-section-header">Overlays</h4>
         <div id="pip-overlays-container">
           ${pipConfig.overlays.map((overlay, idx) => this.renderPipOverlay(overlay, idx)).join('')}
         </div>
 
-        <button id="add-pip-overlay" class="btn-secondary" style="width: 100%; margin-top: 12px;">+ Add Overlay</button>
+        <button id="add-pip-overlay" class="btn-secondary pip-add-button">+ Add Overlay</button>
       </div>
     `;
 
     container.innerHTML = html;
 
-    // Attach event listeners
-    document.getElementById('add-pip-overlay').addEventListener('click', () => this.addPipOverlay());
-
-    // Attach remove handlers for existing overlays
-    container.querySelectorAll('.pip-overlay-remove').forEach((btn, idx) => {
-      btn.addEventListener('click', () => this.removePipOverlay(idx));
-    });
-
-    // Attach corner button handlers
-    container.querySelectorAll('.corner-selector button').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+    // Use event delegation on the container instead of attaching individual listeners
+    container.addEventListener('click', (e) => {
+      if (e.target.id === 'add-pip-overlay') {
+        this.addPipOverlay();
+      }
+      if (e.target.classList.contains('pip-overlay-remove')) {
+        const index = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
+        this.removePipOverlay(index);
+      }
+      if (e.target.matches('.corner-selector button')) {
         const overlayIndex = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
         const corner = e.target.dataset.corner;
         this.selectCorner(overlayIndex, corner);
-      });
+      }
     });
+
+    // Add validation for main camera selection to prevent duplicates
+    const mainCameraSelect = document.getElementById('pip-main-camera');
+    if (mainCameraSelect) {
+      mainCameraSelect.addEventListener('change', () => {
+        this.validateMainCameraSelection();
+      });
+    }
+  }
+
+  validateMainCameraSelection() {
+    const mainCameraId = document.getElementById('pip-main-camera').value;
+    const overlays = this.getActivePipOverlays();
+
+    // Check if main camera is also used in any overlay
+    const conflict = overlays.find(overlay => overlay.camera_id === mainCameraId);
+
+    if (conflict) {
+      alert('The main camera cannot also be used as an overlay. Please remove it from overlays first.');
+      // Optionally, you could auto-remove the conflicting overlay here
+    }
   }
 
   renderPipOverlay(overlay, index) {
-    const camera = this.cameras.find(c => c.id === overlay.camera_id);
     return `
       <div class="pip-overlay-item" data-overlay-index="${index}">
         <div class="pip-overlay-header">
@@ -1259,7 +1258,6 @@ class StageView {
   }
 
   addPipOverlay() {
-    const container = document.getElementById('pip-overlays-container');
     const currentOverlays = this.getActivePipOverlays();
 
     // Find an available corner
@@ -1289,18 +1287,8 @@ class StageView {
 
     currentOverlays.push(newOverlay);
 
-    // Re-render the overlays
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-    const layout = {
-      name: nameInput.value || 'New Layout',
-      layout_type: typeSelect.value,
-      pip_config: {
-        main_camera_id: mainCameraId,
-        overlays: currentOverlays
-      }
-    };
-
+    // Re-render the overlays using the helper method
+    const layout = this.getCurrentPipLayout();
     this.renderPipConfig(layout);
   }
 
@@ -1308,20 +1296,8 @@ class StageView {
     const currentOverlays = this.getActivePipOverlays();
     currentOverlays.splice(index, 1);
 
-    // Re-render
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-    const mainCameraId = document.getElementById('pip-main-camera').value;
-
-    const layout = {
-      name: nameInput.value || 'New Layout',
-      layout_type: typeSelect.value,
-      pip_config: {
-        main_camera_id: mainCameraId,
-        overlays: currentOverlays
-      }
-    };
-
+    // Re-render using the helper method
+    const layout = this.getCurrentPipLayout();
     this.renderPipConfig(layout);
   }
 
@@ -1337,20 +1313,8 @@ class StageView {
     // Update the corner for this overlay
     currentOverlays[overlayIndex].corner = corner;
 
-    // Re-render
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-    const mainCameraId = document.getElementById('pip-main-camera').value;
-
-    const layout = {
-      name: nameInput.value || 'New Layout',
-      layout_type: typeSelect.value,
-      pip_config: {
-        main_camera_id: mainCameraId,
-        overlays: currentOverlays
-      }
-    };
-
+    // Re-render using the helper method
+    const layout = this.getCurrentPipLayout();
     this.renderPipConfig(layout);
   }
 
