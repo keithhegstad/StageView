@@ -148,6 +148,12 @@ class StageView {
         console.error(`Stream error for ${cameraName}:`, error, `(encoder: ${encoder})`);
       });
 
+      // Listen for reload-config event
+      await listen("reload-config", () => {
+        console.log("Config reloaded, refreshing UI...");
+        location.reload();
+      });
+
       this.render();
       this.startShuffleTimer();
 
