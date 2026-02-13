@@ -74,6 +74,7 @@ struct AppState {
     config_path: String,
     ffmpeg_path: PathBuf,
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -490,6 +491,7 @@ pub fn run() {
                 config_path,
                 ffmpeg_path,
                 stream_tasks: Mutex::new(HashMap::new()),
+                reconnect_attempts: Mutex::new(HashMap::new()),
             });
 
             // Start the HTTP API server for remote control
