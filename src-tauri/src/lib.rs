@@ -210,18 +210,20 @@ impl BufferPool {
     fn acquire(&self) -> Vec<u8> {
         self.buffers
             .lock()
-            .unwrap()
+            .expect("BufferPool mutex poisoned - this indicates a panic in another thread")
             .pop()
             .unwrap_or_else(|| Vec::with_capacity(64 * 1024))
     }
 
     fn release(&self, mut buf: Vec<u8>) {
         buf.clear();
-        let mut pool = self.buffers.lock().unwrap();
-        if pool.len() < self.max_buffers {
-            pool.push(buf);
+
+        // If lock fails, simply drop the buffer (acceptable failure mode)
+        if let Ok(mut pool) = self.buffers.lock() {
+            if pool.len() < self.max_buffers {
+                pool.push(buf);
+            }
         }
-        // Else: drop buffer (pool is full)
     }
 }
 
@@ -649,6 +651,9 @@ async fn try_stream_camera(
         }
     }
 
+    // Return buffer to pool before stream ends
+    state.buffer_pool.release(frame);
+
     eprintln!(
         "[StageView] Stream ended for {} after {} frames",
         camera_id, frame_count_local
@@ -899,7 +904,9 @@ pub fn run() {
                 stream_tasks: Mutex::new(HashMap::new()),
                 reconnect_attempts: Mutex::new(HashMap::new()),
                 stream_health: Mutex::new(HashMap::new()),
-                buffer_pool: BufferPool::new(32), // Pool of 32 buffers
+                // Pool of 32 buffers: allows 2 buffers per camera for up to 16 simultaneous streams
+                // (one being filled, one being encoded) with room for temporary spikes
+                buffer_pool: BufferPool::new(32),
             });
 
             // Restore window position and size
