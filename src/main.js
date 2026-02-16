@@ -1,7 +1,7 @@
 // ── StageView ────────────────────────────────────────────────────────────────
 // Lightweight multi-camera grid viewer with burn-in protection.
-// Streams are decoded by ffmpeg in the Rust backend and pushed to the
-// frontend as base64 JPEG frames via Tauri events — no HTTP proxy needed.
+// Streams are rendered natively by the browser via <img src> pointed at
+// the backend's MJPEG HTTP endpoint (multipart/x-mixed-replace).
 
 function waitForTauri(timeout = 5000) {
   return new Promise((resolve, reject) => {
@@ -26,6 +26,142 @@ function getCurrentWindow() {
   return window.__TAURI__.window.getCurrentWindow();
 }
 
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ── Canvas-based MJPEG Stream Reader ─────────────────────────────────────────
+// Reads an MJPEG stream via fetch(), decodes JPEG frames off the main thread
+// with createImageBitmap(), and holds the latest bitmap for rAF rendering.
+// This replaces <img src="mjpeg-url"> to avoid per-frame repaints that saturate
+// the browser rendering pipeline.
+
+class MjpegStreamReader {
+  constructor(url, canvas) {
+    this.url = url;
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.latestBitmap = null;
+    this.abortController = null;
+    this.running = false;
+    this._firstFrame = false;
+    this.onFirstFrame = null; // callback
+  }
+
+  async start() {
+    this.abortController = new AbortController();
+    this.running = true;
+    let retryDelay = 1000; // start at 1s, exponential backoff up to 5s
+
+    while (this.running) {
+      try {
+        const response = await fetch(this.url, { signal: this.abortController.signal });
+        const reader = response.body.getReader();
+        let buffer = new Uint8Array(0);
+        retryDelay = 1000; // reset on successful connect
+
+        while (this.running) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer = this._concat(buffer, value);
+          buffer = await this._extractFrames(buffer);
+        }
+      } catch (e) {
+        if (e.name === 'AbortError' || !this.running) return;
+        console.error('MJPEG stream error, reconnecting in', retryDelay + 'ms:', e);
+      }
+
+      if (!this.running) return;
+      await new Promise(r => setTimeout(r, retryDelay));
+      retryDelay = Math.min(retryDelay * 2, 5000);
+    }
+  }
+
+  stop() {
+    this.running = false;
+    if (this.abortController) this.abortController.abort();
+    if (this.latestBitmap) { this.latestBitmap.close(); this.latestBitmap = null; }
+  }
+
+  _concat(a, b) {
+    const result = new Uint8Array(a.length + b.length);
+    result.set(a, 0);
+    result.set(b, a.length);
+    return result;
+  }
+
+  async _extractFrames(buffer) {
+    // Scan for JPEG SOI (0xFFD8) and EOI (0xFFD9) markers
+    let searchFrom = 0;
+    let lastFrameEnd = -1;
+
+    while (searchFrom < buffer.length - 1) {
+      // Find SOI
+      let soiIndex = -1;
+      for (let i = searchFrom; i < buffer.length - 1; i++) {
+        if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+          soiIndex = i;
+          break;
+        }
+      }
+      if (soiIndex === -1) break;
+
+      // Find EOI after SOI
+      let eoiIndex = -1;
+      for (let i = soiIndex + 2; i < buffer.length - 1; i++) {
+        if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
+          eoiIndex = i;
+          break;
+        }
+      }
+      if (eoiIndex === -1) break; // Incomplete frame, wait for more data
+
+      // Complete frame: SOI to EOI+2
+      const frameEnd = eoiIndex + 2;
+      const frameData = buffer.slice(soiIndex, frameEnd);
+
+      // Decode off the main thread
+      try {
+        const blob = new Blob([frameData], { type: 'image/jpeg' });
+        const bitmap = await createImageBitmap(blob);
+        // Replace latest bitmap (close the old one)
+        if (this.latestBitmap) this.latestBitmap.close();
+        this.latestBitmap = bitmap;
+
+        if (!this._firstFrame) {
+          this._firstFrame = true;
+          if (this.onFirstFrame) this.onFirstFrame();
+        }
+      } catch (e) {
+        // Bad JPEG, skip
+      }
+
+      lastFrameEnd = frameEnd;
+      searchFrom = frameEnd;
+    }
+
+    // Return remaining buffer after last complete frame
+    if (lastFrameEnd > 0) {
+      return buffer.slice(lastFrameEnd);
+    }
+
+    // If buffer is growing too large without finding frames, trim it
+    if (buffer.length > 5 * 1024 * 1024) {
+      console.warn('MJPEG buffer exceeded 5MB without complete frame, resetting');
+      return new Uint8Array(0);
+    }
+
+    return buffer;
+  }
+
+  draw() {
+    if (this.latestBitmap) {
+      this.ctx.drawImage(this.latestBitmap, 0, 0, this.canvas.width, this.canvas.height);
+    }
+  }
+}
+
 class StageView {
   constructor() {
     this.cameras = [];
@@ -33,26 +169,25 @@ class StageView {
     this.shuffleIntervalSecs = 900;
     this.showStatusDots = true;
     this.showCameraNames = true;
-    this.quality = "medium";
     this.apiPort = 8090;
     this.shuffleTimerId = null;
-    this.countdownId = null;
+    this._noiseDataUrl = null; // cached noise texture for pixel refresh
     this.nextShuffleAt = 0;
-    this.unlistenFrame = null;
     this.unlistenStatus = null;
     this.unlistenCommand = null;
     this.soloIndex = null; // null = grid view, number = 1-based solo index
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
-    this.layouts = [];
-    this.activeLayout = null;
-    this.layoutMode = "grid"; // "grid", "pip"
-    this.presets = [];
     this.draggedTile = null;
     this.dragStartIndex = null;
     this.previousHealthValues = new Map(); // stores previous health values for change detection
-    this.cameraHealthStates = new Map(); // Track health per camera
-    this.healthCheckInterval = null;
+    this.healthStats = new Map(); // camera_id -> health object
+    this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
+    this._configSavePromise = null; // serializes config save operations
+    this.streamReaders = new Map(); // camera_id -> MjpegStreamReader
+    this._rafId = null;
+    this._idleTimer = null;
+    this._isIdle = false;
     this.init();
   }
 
@@ -66,54 +201,19 @@ class StageView {
       this.shuffleIntervalSecs = config.shuffle_interval_secs;
       this.showStatusDots = config.show_status_dots !== false;
       this.showCameraNames = config.show_camera_names !== false;
-      this.quality = config.quality || "medium";
       this.apiPort = config.api_port || 8090;
-      this.layouts = config.layouts || [];
-      this.activeLayout = config.active_layout || "Default Grid";
-      this.presets = config.presets || [];
-
-      // Migrate legacy layouts
-      this.migrateLegacyLayouts();
-
-      // Determine layout mode
-      const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
-      this.layoutMode = currentLayout?.layout_type || "grid";
-
-      // Listen for frame events from the Rust backend
-      this.unlistenFrame = await listen("camera-frame", (event) => {
-        const { camera_id, data } = event.payload;
-        const img = document.querySelector(
-          `[data-id="${camera_id}"] img`
-        );
-        if (img) {
-          img.src = `data:image/jpeg;base64,${data}`;
-          if (!img.classList.contains("has-frame")) {
-            img.classList.add("has-frame");
-          }
-        }
-      });
 
       // Listen for camera status events (online / offline / error / connecting / reconnecting)
       this.unlistenStatus = await listen("camera-status", (event) => {
         const { camera_id, status } = event.payload;
+
+        // Track status in Map so we can restore it after re-render
+        this.cameraStatuses.set(camera_id, status);
+
         const tile = document.querySelector(`[data-id="${camera_id}"]`);
         if (!tile) return;
-        const spinner = tile.querySelector(".loading-spinner");
-        const statusEl = tile.querySelector(".camera-status");
 
-        if (status === "online") {
-          spinner.style.display = "none";
-          statusEl.classList.remove("offline", "reconnecting");
-        } else if (status === "connecting" || status.startsWith("reconnecting")) {
-          spinner.style.display = "";
-          statusEl.classList.add("reconnecting");
-          statusEl.classList.remove("offline");
-        } else {
-          // "error" or "offline"
-          spinner.style.display = "none";
-          statusEl.classList.add("offline");
-          statusEl.classList.remove("reconnecting");
-        }
+        this.applyCameraStatus(tile, status);
       });
 
       // Listen for remote commands from the API server
@@ -127,7 +227,6 @@ class StageView {
       });
 
       // Listen for stream health updates
-      this.healthStats = new Map(); // camera_id -> health object
       this.unlistenHealth = await listen("stream-health", (event) => {
         const { camera_id, health } = event.payload;
         this.healthStats.set(camera_id, health);
@@ -136,16 +235,13 @@ class StageView {
 
       // Listen for stream errors
       this.unlistenStreamError = await listen("stream-error", (event) => {
-        const { camera_id, error, encoder } = event.payload;
+        const { camera_id, error } = event.payload;
         const camera = this.cameras.find(c => c.id === camera_id);
         const cameraName = camera ? camera.name : camera_id;
 
-        this.showToast(
-          `${cameraName}: ${error}. Try selecting a different encoder in settings.`,
-          'error'
-        );
+        this.showToast(`${cameraName}: ${error}`, 'error');
 
-        console.error(`Stream error for ${cameraName}:`, error, `(encoder: ${encoder})`);
+        console.error(`Stream error for ${cameraName}:`, error);
       });
 
       // Listen for reload-config event
@@ -155,6 +251,7 @@ class StageView {
       });
 
       this.render();
+      this._startRenderLoop();
       this.startShuffleTimer();
 
       // Tell the backend to start ffmpeg for each camera
@@ -162,13 +259,6 @@ class StageView {
         await invoke("start_streams");
       }
 
-      // Initialize health states for all cameras
-      this.cameras.forEach(cam => {
-        this.cameraHealthStates.set(cam.id, 'offline');
-      });
-
-      // Start health monitoring
-      this.startHealthMonitoring();
     } catch (err) {
       console.error("StageView init failed:", err);
       this.render();
@@ -178,60 +268,7 @@ class StageView {
     this.bindKeys();
     this.updateToolbar();
     this.setupWindowStatePersistence();
-  }
-
-  // ── Legacy Layout Migration ─────────────────────────────────────────────
-
-  migrateLegacyLayouts() {
-    let hasLegacy = false;
-
-    this.layouts = this.layouts.map(layout => {
-      // Migrate custom layouts to grid
-      if (layout.layout_type === "custom") {
-        hasLegacy = true;
-        console.warn(`Legacy custom layout "${layout.name}" migrated to grid`);
-        return {
-          ...layout,
-          layout_type: "grid",
-          pip_config: null
-        };
-      }
-
-      // Detect old PIP layouts with positions instead of pip_config
-      if (layout.layout_type === "pip" && !layout.pip_config && layout.positions?.length > 0) {
-        hasLegacy = true;
-        console.warn(`Legacy PIP layout "${layout.name}" needs reconfiguration`);
-        return {
-          ...layout,
-          pip_config: null
-        };
-      }
-
-      return layout;
-    });
-
-    if (hasLegacy && this.layouts.length > 0) {
-      // Show one-time notification
-      if (!localStorage.getItem('stageview_migration_notified')) {
-        setTimeout(() => {
-          alert("StageView has been simplified! Legacy custom layouts have been converted to Auto Grid. PIP layouts may need reconfiguration.");
-          localStorage.setItem('stageview_migration_notified', 'true');
-        }, 1000);
-      }
-
-      // Save migrated layouts
-      this.saveMigratedLayouts();
-    }
-  }
-
-  async saveMigratedLayouts() {
-    try {
-      const config = await invoke("get_config");
-      config.layouts = this.layouts;
-      await invoke("save_config", { config });
-    } catch (e) {
-      console.error("Failed to save migrated layouts:", e);
-    }
+    this.setupIdleHiding();
   }
 
   // ── UI Event Binding ───────────────────────────────────────────────────
@@ -257,95 +294,42 @@ class StageView {
     document.getElementById('add-camera-btn').addEventListener('click', () => this.addCameraField());
     document.getElementById('save-settings-btn').addEventListener('click', () => this.saveSettings());
 
-    // Layout editor
-    document.getElementById('layout-editor-btn').addEventListener('click', () => this.openLayoutEditor());
-    document.getElementById('layout-editor-overlay').addEventListener('click', (e) => {
-      if (e.target.id === 'layout-editor-overlay') this.closeLayoutEditor();
-    });
-    document.getElementById('close-layout-editor-btn').addEventListener('click', () => this.closeLayoutEditor());
-    document.getElementById('save-layout-btn').addEventListener('click', () => this.saveCurrentLayout());
-    document.getElementById('apply-layout-btn').addEventListener('click', () => this.applyCurrentLayout());
-    document.getElementById('layout-type-select').addEventListener('change', (e) => this.handleLayoutTypeChange(e.target.value));
-
-    // PIP editor event delegation (single listener for all dynamically added buttons)
-    const pipContainer = document.getElementById('layout-camera-list');
-    if (pipContainer) {
-      pipContainer.addEventListener('click', (e) => {
-        if (e.target.id === 'add-pip-overlay') {
-          console.log('[PIP] Add overlay button clicked');
-          this.addPipOverlay();
-        }
-        if (e.target.classList.contains('pip-overlay-remove')) {
-          const index = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
-          this.removePipOverlay(index);
-        }
-        if (e.target.matches('.corner-selector button')) {
-          const overlayIndex = parseInt(e.target.closest('.pip-overlay-item').dataset.overlayIndex);
-          const corner = e.target.dataset.corner;
-          this.selectCorner(overlayIndex, corner);
-        }
-      });
-
-      // Main camera selection change listener
-      pipContainer.addEventListener('change', (e) => {
-        if (e.target.id === 'pip-main-camera') {
-          this.validateMainCameraSelection();
-        }
-      });
-    }
-
-    // Camera configuration modal (check if not already bound)
+    // Inline camera quality/fps dropdown delegation
     const cameraList = document.getElementById('camera-list');
-    if (cameraList && !cameraList.dataset.configListenerBound) {
-      cameraList.addEventListener('click', (e) => {
-        if (e.target.classList.contains('btn-config')) {
-          const cameraIndex = parseInt(e.target.dataset.cameraIndex);
-          this.openCameraConfigModal(cameraIndex);
+    if (cameraList && !cameraList.dataset.inlineListenerBound) {
+      cameraList.addEventListener('change', (e) => {
+        const entry = e.target.closest('.camera-entry');
+        if (!entry) return;
+        const idx = parseInt(entry.dataset.index);
+        if (isNaN(idx) || !this.cameras[idx]) return;
+
+        if (e.target.classList.contains('cam-quality')) {
+          const val = e.target.value;
+          if (val === '') {
+            // "Global" selected — remove override
+            delete this.cameras[idx].codec_override;
+          } else {
+            if (!this.cameras[idx].codec_override) {
+              this.cameras[idx].codec_override = { quality: val, fps_mode: 'native' };
+            } else {
+              this.cameras[idx].codec_override.quality = val;
+            }
+          }
+        }
+
+        if (e.target.classList.contains('cam-fps')) {
+          const val = e.target.value;
+          if (!this.cameras[idx].codec_override) {
+            this.cameras[idx].codec_override = { quality: 'medium', fps_mode: 'native' };
+          }
+          if (val === 'native') {
+            this.cameras[idx].codec_override.fps_mode = 'native';
+          } else {
+            this.cameras[idx].codec_override.fps_mode = { capped: parseInt(val) };
+          }
         }
       });
-      cameraList.dataset.configListenerBound = "true";
-    }
-
-    // Camera config modal listeners (check if not already bound)
-    const configModal = document.getElementById('camera-config-modal');
-    if (configModal && !configModal.dataset.listenerBound) {
-      configModal.addEventListener('click', (e) => {
-        if (e.target.id === 'camera-config-modal') {
-          this.closeCameraConfigModal();
-        }
-      });
-      configModal.dataset.listenerBound = "true";
-    }
-
-    const modalCloseBtn = document.getElementById('modal-close-btn');
-    if (modalCloseBtn && !modalCloseBtn.dataset.listenerBound) {
-      modalCloseBtn.addEventListener('click', () => this.closeCameraConfigModal());
-      modalCloseBtn.dataset.listenerBound = "true";
-    }
-
-    const modalCancelBtn = document.getElementById('modal-cancel-btn');
-    if (modalCancelBtn && !modalCancelBtn.dataset.listenerBound) {
-      modalCancelBtn.addEventListener('click', () => this.closeCameraConfigModal());
-      modalCancelBtn.dataset.listenerBound = "true";
-    }
-
-    const modalSaveBtn = document.getElementById('modal-save-btn');
-    if (modalSaveBtn && !modalSaveBtn.dataset.listenerBound) {
-      modalSaveBtn.addEventListener('click', () => this.saveCameraConfig());
-      modalSaveBtn.dataset.listenerBound = "true";
-    }
-
-    const modalFpsMode = document.getElementById('modal-fps-mode');
-    if (modalFpsMode && !modalFpsMode.dataset.listenerBound) {
-      modalFpsMode.addEventListener('change', (e) => {
-        const fpsValueContainer = document.getElementById('modal-fps-value-container');
-        if (e.target.value === 'capped') {
-          fpsValueContainer.style.display = 'block';
-        } else {
-          fpsValueContainer.style.display = 'none';
-        }
-      });
-      modalFpsMode.dataset.listenerBound = "true";
+      cameraList.dataset.inlineListenerBound = "true";
     }
   }
 
@@ -363,19 +347,7 @@ class StageView {
     }
 
     empty.classList.add("hidden");
-
-    // Set layout mode data attribute for CSS
-    grid.setAttribute("data-layout", this.layoutMode);
-
-    // Render based on layout mode
-    if (this.layoutMode === "grid") {
-      this.renderGridLayout(grid);
-    } else if (this.layoutMode === "pip") {
-      this.renderPipLayout(grid);
-    } else {
-      // Fallback to grid for legacy custom layouts
-      this.renderGridLayout(grid);
-    }
+    this.renderGridLayout(grid);
   }
 
   renderGridLayout(grid) {
@@ -393,95 +365,77 @@ class StageView {
       .join("");
 
     this.bindTileEvents(grid);
-  }
 
-  renderPipLayout(grid) {
-    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
-    if (!currentLayout || !currentLayout.pip_config) {
-      // Fallback to grid if no PIP config
-      this.renderGridLayout(grid);
-      return;
-    }
-
-    const pipConfig = currentLayout.pip_config;
-
-    // For PIP layouts, use absolute positioning
-    grid.style.gridTemplateColumns = "";
-    grid.style.gridTemplateRows = "";
-    grid.style.position = "relative";
-
-    // Constants for PIP positioning
-    const OVERLAY_MARGIN = '2%';
-    const OVERLAY_BASE_Z_INDEX = 10;
-    const MAIN_CAMERA_Z_INDEX = 1;
-    const MIN_SIZE_PERCENT = 10;
-    const MAX_SIZE_PERCENT = 40;
-
-    // Define corner position mappings
-    const positions = {
-      TL: { left: OVERLAY_MARGIN, top: OVERLAY_MARGIN },
-      TR: { right: OVERLAY_MARGIN, top: OVERLAY_MARGIN },
-      BL: { left: OVERLAY_MARGIN, bottom: OVERLAY_MARGIN },
-      BR: { right: OVERLAY_MARGIN, bottom: OVERLAY_MARGIN }
-    };
-
-    let tiles = [];
-
-    // 1. Create main camera tile (100% width/height, z-index: 1)
-    const mainCamera = this.cameras.find(c => c.id === pipConfig.main_camera_id);
-    if (mainCamera) {
-      const mainStyle = 'position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: ' + MAIN_CAMERA_Z_INDEX;
-      tiles.push(this.createCameraTileHTML(mainCamera, mainStyle));
-    }
-
-    // 2. Create overlay tiles for each PIP overlay
-    pipConfig.overlays.forEach((overlay, idx) => {
-      const overlayCamera = this.cameras.find(c => c.id === overlay.camera_id);
-      if (!overlayCamera) return;
-
-      const corner = overlay.corner;
-      const cornerPos = positions[corner] || positions.BR; // Default to BR if corner not found
-
-      // Validate and clamp size_percent to backend-enforced range
-      const sizePercent = Math.max(MIN_SIZE_PERCENT, Math.min(MAX_SIZE_PERCENT, overlay.size_percent || 25));
-      const size = `${sizePercent}%`;
-
-      // Build position style using array-based approach
-      const positionStyles = Object.entries(cornerPos)
-        .map(([key, value]) => `${key}: ${value}`)
-        .join('; ');
-
-      const overlayStyle = `position: absolute; ${positionStyles}; width: ${size}; height: ${size}; z-index: ${OVERLAY_BASE_Z_INDEX + idx}`;
-      tiles.push(this.createCameraTileHTML(overlayCamera, overlayStyle));
+    // Restore camera status for any cameras that already have a known status
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+      const camId = tile.dataset.id;
+      const status = this.cameraStatuses.get(camId);
+      if (status) {
+        this.applyCameraStatus(tile, status);
+      }
     });
-
-    grid.innerHTML = tiles.join("");
-    this.bindTileEvents(grid);
-  }
-
-  createCameraTileHTML(camera, styleString) {
-    return `
-      <div class="camera-tile" data-id="${camera.id}" style="${styleString}">
-        <div class="loading-spinner"></div>
-        <img />
-        <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${camera.name}</div>
-      </div>
-    `;
   }
 
   createCameraTile(cam, idx) {
     return `
       <div class="camera-tile" data-id="${cam.id}">
         <div class="loading-spinner"></div>
-        <img />
+        <canvas></canvas>
         <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${cam.name}</div>
+        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${escapeHtml(cam.name)}</div>
       </div>
     `;
   }
 
+  applyCameraStatus(tile, status) {
+    const spinner = tile.querySelector(".loading-spinner");
+    const statusEl = tile.querySelector(".camera-status");
+
+    if (status === "online") {
+      spinner.style.display = "none";
+      statusEl.classList.remove("offline", "reconnecting");
+    } else if (status === "connecting" || status.startsWith("reconnecting")) {
+      spinner.style.display = "";
+      statusEl.classList.add("reconnecting");
+      statusEl.classList.remove("offline");
+    } else {
+      // "error" or "offline"
+      spinner.style.display = "none";
+      statusEl.classList.add("offline");
+      statusEl.classList.remove("reconnecting");
+    }
+  }
+
   bindTileEvents(grid) {
+    // Stop any existing stream readers before creating new ones
+    this._stopAllReaders();
+
+    // Create MjpegStreamReader for each tile's <canvas>
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+      const canvas = tile.querySelector("canvas");
+      const camId = tile.dataset.id;
+      if (!canvas || !camId) return;
+
+      const url = `http://localhost:${this.apiPort}/camera/${camId}/stream`;
+      const reader = new MjpegStreamReader(url, canvas);
+
+      // Size the canvas to match tile dimensions (update on resize)
+      this._sizeCanvas(canvas, tile);
+
+      reader.onFirstFrame = () => {
+        canvas.classList.add("has-frame");
+        const spinner = tile.querySelector(".loading-spinner");
+        if (spinner) spinner.style.display = "none";
+        const statusEl = tile.querySelector(".camera-status");
+        if (statusEl) {
+          statusEl.classList.remove("offline", "reconnecting");
+        }
+      };
+
+      this.streamReaders.set(camId, reader);
+      reader.start();
+    });
+
     // Double-click a tile to solo it
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       tile.addEventListener("dblclick", () => {
@@ -494,25 +448,83 @@ class StageView {
         }
       });
 
-      // Add drag-and-drop for grid mode only
-      if (this.layoutMode === "grid") {
-        const camId = tile.dataset.id;
-        const cameraIndex = this.cameras.findIndex((c) => c.id === camId);
+      // Add drag-and-drop
+      const camId = tile.dataset.id;
+      const cameraIndex = this.cameras.findIndex((c) => c.id === camId);
 
-        tile.draggable = true;
-        tile.addEventListener("dragstart", (e) => this.handleDragStart(e, cameraIndex));
-        tile.addEventListener("dragover", (e) => this.handleDragOver(e));
-        tile.addEventListener("drop", (e) => this.handleDrop(e, cameraIndex));
-        tile.addEventListener("dragend", (e) => this.handleDragEnd(e));
-      }
+      tile.draggable = true;
+      tile.addEventListener("dragstart", (e) => this.handleDragStart(e, cameraIndex));
+      tile.addEventListener("dragover", (e) => this.handleDragOver(e));
+      tile.addEventListener("dragleave", (e) => e.currentTarget.classList.remove("drag-over"));
+      tile.addEventListener("drop", (e) => this.handleDrop(e, cameraIndex));
+      tile.addEventListener("dragend", (e) => this.handleDragEnd(e));
     });
+  }
+
+  // ── Canvas Rendering Helpers ────────────────────────────────────────────
+
+  _startRenderLoop() {
+    if (this._rafId) return;
+    const loop = () => {
+      for (const reader of this.streamReaders.values()) {
+        reader.draw();
+      }
+      this.updateCountdown();
+      this._rafId = requestAnimationFrame(loop);
+    };
+    this._rafId = requestAnimationFrame(loop);
+  }
+
+  _stopRenderLoop() {
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+  }
+
+  _stopAllReaders() {
+    for (const reader of this.streamReaders.values()) {
+      reader.stop();
+    }
+    this.streamReaders.clear();
+  }
+
+  _sizeCanvas(canvas, container) {
+    const resize = () => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+      }
+    };
+    resize();
+    if (!this._resizeObserver) {
+      let resizeScheduled = false;
+      this._resizeObserver = new ResizeObserver((entries) => {
+        if (resizeScheduled) return;
+        resizeScheduled = true;
+        requestAnimationFrame(() => {
+          resizeScheduled = false;
+          for (const entry of entries) {
+            const tile = entry.target;
+            const c = tile.querySelector("canvas");
+            const w = entry.contentRect.width;
+            const h = entry.contentRect.height;
+            if (c && w > 0 && h > 0) {
+              c.width = w;
+              c.height = h;
+            }
+          }
+        });
+      });
+    }
+    this._resizeObserver.observe(container);
   }
 
   // ── Burn-in Shuffle ─────────────────────────────────────────────────────
 
   startShuffleTimer() {
-    clearInterval(this.shuffleTimerId);
-    clearInterval(this.countdownId);
+    clearTimeout(this.shuffleTimerId);
 
     if (this.cameras.length < 2) {
       document.getElementById("shuffle-timer").textContent = "";
@@ -521,13 +533,14 @@ class StageView {
 
     this.nextShuffleAt = Date.now() + this.shuffleIntervalSecs * 1000;
 
-    this.shuffleTimerId = setInterval(() => {
-      this.shuffleCameras();
-      this.nextShuffleAt = Date.now() + this.shuffleIntervalSecs * 1000;
-    }, this.shuffleIntervalSecs * 1000);
-
-    this.countdownId = setInterval(() => this.updateCountdown(), 1000);
-    this.updateCountdown();
+    const scheduleNext = () => {
+      this.shuffleTimerId = setTimeout(() => {
+        this.shuffleCameras();
+        this.nextShuffleAt = Date.now() + this.shuffleIntervalSecs * 1000;
+        scheduleNext();
+      }, this.shuffleIntervalSecs * 1000);
+    };
+    scheduleNext();
   }
 
   updateCountdown() {
@@ -535,10 +548,17 @@ class StageView {
       0,
       Math.ceil((this.nextShuffleAt - Date.now()) / 1000)
     );
-    const min = Math.floor(remaining / 60);
+    const hrs = Math.floor(remaining / 3600);
+    const min = Math.floor((remaining % 3600) / 60);
     const sec = remaining % 60;
-    document.getElementById("shuffle-timer").textContent =
-      `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    const timerEl = document.getElementById("shuffle-timer");
+    if (hrs > 0) {
+      timerEl.textContent =
+        `${String(hrs).padStart(2, "0")}:${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    } else {
+      timerEl.textContent =
+        `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    }
   }
 
   shuffleCameras() {
@@ -558,21 +578,14 @@ class StageView {
         [this.displayOrder[j], this.displayOrder[i]];
     }
 
-    // Rearrange DOM tiles using displayOrder
+    // Apply visual reorder via CSS order (preserves DOM tree / canvas context)
     const grid = document.getElementById("grid");
-    const tileMap = {};
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      tileMap[tile.dataset.id] = tile;
+      const camId = tile.dataset.id;
+      const camIndex = this.cameras.findIndex(c => c.id === camId);
+      const orderPos = this.displayOrder.indexOf(camIndex);
+      tile.style.order = orderPos >= 0 ? orderPos : 0;
     });
-
-    // Append in displayOrder sequence
-    for (const index of this.displayOrder) {
-      const cam = this.cameras[index];
-      const tile = tileMap[cam.id];
-      if (tile) {
-        grid.appendChild(tile);
-      }
-    }
   }
 
   // ── Solo Camera Mode ────────────────────────────────────────────────────
@@ -584,19 +597,26 @@ class StageView {
 
     const grid = document.getElementById("grid");
 
-    // Hide all tiles except the solo'd one
+    // Hide all tiles except the solo'd one; stop non-solo stream readers
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       if (tile.dataset.id === cam.id) {
         tile.classList.add("solo");
         tile.style.display = "";
       } else {
         tile.style.display = "none";
+        // Stop the reader for non-solo cameras
+        const reader = this.streamReaders.get(tile.dataset.id);
+        if (reader) {
+          reader.stop();
+          this.streamReaders.delete(tile.dataset.id);
+        }
       }
     });
 
     // Switch grid to single cell
     grid.style.gridTemplateColumns = "1fr";
     grid.style.gridTemplateRows = "1fr";
+    grid.style.position = "";
 
     // Tell backend to stop non-solo streams (save resources)
     await invoke("solo_camera", { cameraId: cam.id });
@@ -611,22 +631,11 @@ class StageView {
     if (this.soloIndex === null) return;
     this.soloIndex = null;
 
-    const grid = document.getElementById("grid");
-
-    // Show all tiles and remove solo class
-    grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      tile.classList.remove("solo");
-      tile.style.display = "";
-    });
-
-    // Restore grid layout
-    const cols = Math.ceil(Math.sqrt(this.cameras.length));
-    const rows = Math.ceil(this.cameras.length / cols);
-    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
-
     // Restart all streams
     await invoke("grid_view");
+
+    // Re-render using the current layout mode (grid or PIP)
+    this.render();
 
     this.updateToolbar();
     this.closeCameraMenu();
@@ -636,9 +645,6 @@ class StageView {
   // ── Pixel Refresh (burn-in protection in solo mode) ─────────────────────
 
   doPixelRefresh() {
-    // ── Pixel Orbiting ─────────────────────────────────────────────────
-    // Shift the grid content by 1-2px in a different direction each cycle.
-    // This is the industry-standard TV burn-in protection technique.
     const orbits = [
       { x:  1, y:  0 }, { x:  1, y:  1 }, { x:  0, y:  1 }, { x: -1, y:  1 },
       { x: -1, y:  0 }, { x: -1, y: -1 }, { x:  0, y: -1 }, { x:  1, y: -1 },
@@ -651,27 +657,28 @@ class StageView {
     grid.style.transition = "transform 1.5s ease-in-out";
     grid.style.transform = `translate(${shift.x}px, ${shift.y}px)`;
 
-    // ── Gentle Noise Overlay ──────────────────────────────────────────
-    // Draw a small noise tile (128×128) and tile it across the screen.
-    // Very low alpha (~0.04) — barely visible, exercises all subpixels.
-    const overlay = document.getElementById("pixel-refresh");
-    const canvas = document.createElement("canvas");
-    canvas.width = 128;
-    canvas.height = 128;
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.createImageData(128, 128);
-    for (let i = 0; i < imgData.data.length; i += 4) {
-      const v = Math.random() * 255;
-      imgData.data[i]     = v;
-      imgData.data[i + 1] = v;
-      imgData.data[i + 2] = v;
-      imgData.data[i + 3] = 10; // ~0.04 opacity
+    // Generate noise texture once, reuse across calls
+    if (!this._noiseDataUrl) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext("2d");
+      const imgData = ctx.createImageData(128, 128);
+      for (let i = 0; i < imgData.data.length; i += 4) {
+        const v = Math.random() * 255;
+        imgData.data[i]     = v;
+        imgData.data[i + 1] = v;
+        imgData.data[i + 2] = v;
+        imgData.data[i + 3] = 10;
+      }
+      ctx.putImageData(imgData, 0, 0);
+      this._noiseDataUrl = canvas.toDataURL();
     }
-    ctx.putImageData(imgData, 0, 0);
-    overlay.style.backgroundImage = `url(${canvas.toDataURL()})`;
+
+    const overlay = document.getElementById("pixel-refresh");
+    overlay.style.backgroundImage = `url(${this._noiseDataUrl})`;
     overlay.style.backgroundRepeat = "repeat";
 
-    // Fade in, hold, fade out via CSS animation
     overlay.classList.add("active");
     setTimeout(() => {
       overlay.classList.remove("active");
@@ -692,7 +699,7 @@ class StageView {
         const isActive = this.soloIndex === idx;
         return `<button class="camera-menu-item${isActive ? ' active' : ''}" data-solo-index="${idx}">
           <div class="camera-menu-item-icon">${idx}</div>
-          <span class="camera-menu-item-label">${cam.name}</span>
+          <span class="camera-menu-item-label">${escapeHtml(cam.name)}</span>
           <svg class="camera-menu-check" viewBox="0 0 16 16" fill="none"><path d="M3 8.5L6.5 12L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>`;
       }).join('');
@@ -785,6 +792,16 @@ class StageView {
         return;
       }
 
+      // Don't trigger shortcuts when typing in input fields
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        // Still allow Escape to work in inputs
+        if (e.key !== "Escape") return;
+      }
+
+      // TEST: Toggle GPU scaling (Press 'T') — no longer relevant with canvas rendering
+      // Kept for debugging purposes
+
       // Fullscreen toggle
       if (e.key === "F11" || (e.key === "f" && !e.ctrlKey)) {
         e.preventDefault();
@@ -837,136 +854,57 @@ class StageView {
     overlay.classList.remove("hidden");
     panel.classList.remove("hidden");
 
+    // Double rAF ensures browser has committed layout before triggering transition
     requestAnimationFrame(() => {
-      overlay.classList.add("visible");
-      panel.classList.add("visible");
+      requestAnimationFrame(() => {
+        overlay.classList.add("visible");
+        panel.classList.add("visible");
+      });
     });
 
-    document.getElementById("shuffle-interval").value = Math.round(
-      this.shuffleIntervalSecs / 60
-    );
+    const totalMins = Math.round(this.shuffleIntervalSecs / 60);
+    document.getElementById("shuffle-interval-hours").value = Math.floor(totalMins / 60);
+    document.getElementById("shuffle-interval-minutes").value = totalMins % 60;
     document.getElementById("show-status-dots").checked = this.showStatusDots;
     document.getElementById("show-camera-names").checked = this.showCameraNames;
-    document.getElementById("quality-select").value = this.quality;
     document.getElementById("api-port").value = this.apiPort;
     this.renderCameraList();
     this.injectHealthSection();
-    this.injectPresetSection();
 
-    // Load codec settings
-    await this.loadCodecSettings();
-
-    // Bind codec event listeners
-    this.bindCodecListeners();
-  }
-
-  async loadCodecSettings() {
+    // Load quality setting
     try {
       const config = await invoke("get_config");
-
-      // Set codec dropdown
-      const codecSelect = document.getElementById("codec-select");
-      if (config.stream_config?.codec && codecSelect) {
-        codecSelect.value = config.stream_config.codec;
-      }
-
-      // Set encoder dropdown
-      const encoderSelect = document.getElementById("encoder-select");
-      if (config.stream_config?.encoder && encoderSelect) {
-        encoderSelect.value = config.stream_config.encoder;
-      }
-
-      // Set quality preset
       const qualitySelect = document.getElementById("quality-preset-select");
       if (config.stream_config?.quality && qualitySelect) {
         qualitySelect.value = config.stream_config.quality;
       }
-
-      // Update encoder availability
-      await this.updateEncoderOptions();
     } catch (err) {
-      console.error("Failed to load codec settings:", err);
-      this.showToast("Failed to load codec settings", 'error');
+      console.error("Failed to load quality setting:", err);
     }
-  }
-
-  async updateEncoderOptions() {
-    try {
-      const available = await invoke("get_available_encoders");
-      const select = document.getElementById("encoder-select");
-      const status = document.getElementById("encoder-status");
-
-      if (!select || !status) {
-        console.warn("Encoder UI elements not found");
-        return;
-      }
-
-      // Enable/disable encoder options based on availability
-      const options = select.querySelectorAll('option');
-      options.forEach(opt => {
-        const value = opt.value;
-        if (value === 'nvenc') opt.disabled = !available.nvenc;
-        else if (value === 'qsv') opt.disabled = !available.qsv;
-        else if (value === 'videotoolbox') opt.disabled = !available.videotoolbox;
-      });
-
-      // Show detection status
-      if (available.nvenc) {
-        status.textContent = "✓ NVIDIA GPU detected (nvenc)";
-        status.style.color = "#10b981";
-      } else if (available.qsv) {
-        status.textContent = "✓ Intel GPU detected (QSV)";
-        status.style.color = "#10b981";
-      } else if (available.videotoolbox) {
-        status.textContent = "✓ macOS hardware acceleration available";
-        status.style.color = "#10b981";
-      } else {
-        status.textContent = "ℹ Using software encoding (x264)";
-        status.style.color = "#f59e0b";
-      }
-    } catch (err) {
-      console.error("Failed to get available encoders:", err);
-      const status = document.getElementById("encoder-status");
-      if (status) {
-        status.textContent = "⚠ Failed to detect hardware";
-        status.style.color = "#ef4444";
-      }
-    }
-  }
-
-  bindCodecListeners() {
-    const refreshBtn = document.getElementById("refresh-hardware");
-    if (!refreshBtn) return;
-
-    // Remove existing listener if present
-    const oldHandler = refreshBtn._codecRefreshHandler;
-    if (oldHandler) {
-      refreshBtn.removeEventListener("click", oldHandler);
-    }
-
-    // Add new listener and store reference
-    const handler = async () => {
-      try {
-        await invoke("refresh_encoders");
-        await this.updateEncoderOptions();
-        this.showToast("Hardware detection refreshed", 'success');
-      } catch (err) {
-        console.error("Failed to refresh encoders:", err);
-        this.showToast("Failed to refresh hardware detection", 'error');
-      }
-    };
-
-    refreshBtn._codecRefreshHandler = handler;
-    refreshBtn.addEventListener("click", handler);
   }
 
   injectHealthSection() {
     const panel = document.querySelector("#settings .settings-body");
     if (!panel) return;
 
-    // Remove existing health section if it exists
+    // If health section already exists with matching cameras, just update the display
     const existingHealth = document.getElementById("health-stats-container");
     if (existingHealth) {
+      const existingIds = new Set(
+        Array.from(existingHealth.querySelectorAll("[data-camera-id]"))
+          .map(el => el.dataset.cameraId)
+      );
+      const currentIds = new Set(this.cameras.map(c => c.id));
+      const sameSet = existingIds.size === currentIds.size &&
+        [...currentIds].every(id => existingIds.has(id));
+
+      if (sameSet) {
+        // Camera list unchanged — just refresh the values in place
+        this.updateHealthDisplay();
+        return;
+      }
+      // Camera list changed — tear down and rebuild; clear stale cache
+      this.previousHealthValues.clear();
       existingHealth.closest(".settings-section")?.remove();
     }
 
@@ -976,8 +914,8 @@ class StageView {
         <h3>Stream Health</h3>
         <div id="health-stats-container">
           ${this.cameras.map(cam => `
-            <div class="health-card" data-camera-id="${cam.id}">
-              <div class="health-camera-name">${cam.name}</div>
+            <div class="health-card" data-camera-id="${cam.id}" data-health-state="unknown">
+              <div class="health-camera-name">${escapeHtml(cam.name)}</div>
               <div class="health-metrics">
                 <div class="health-metric">
                   <span class="health-label">FPS:</span>
@@ -988,12 +926,20 @@ class StageView {
                   <span class="health-value" data-metric="bitrate">--</span>
                 </div>
                 <div class="health-metric">
-                  <span class="health-label">Frames:</span>
-                  <span class="health-value" data-metric="frames">--</span>
-                </div>
-                <div class="health-metric">
                   <span class="health-label">Uptime:</span>
                   <span class="health-value" data-metric="uptime">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Resolution:</span>
+                  <span class="health-value" data-metric="resolution">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Quality:</span>
+                  <span class="health-value" data-metric="quality">--</span>
+                </div>
+                <div class="health-metric">
+                  <span class="health-label">Codec:</span>
+                  <span class="health-value" data-metric="codec">--</span>
                 </div>
               </div>
             </div>
@@ -1005,63 +951,30 @@ class StageView {
     // Insert health section at the top of settings panel
     panel.insertAdjacentHTML('afterbegin', healthHTML);
 
-    // Update health display with current stats
-    this.updateHealthDisplay();
+    // Clear cached previous values so all fields repopulate from scratch
+    this.previousHealthValues.clear();
+
+    // Fetch current health stats from backend and update display
+    this.refreshHealthStats();
   }
 
-  injectPresetSection() {
-    const panel = document.querySelector("#settings .settings-body");
-    if (!panel) return;
-
-    // Remove existing preset section if it exists
-    const existingPresets = document.getElementById("preset-list");
-    if (existingPresets) {
-      existingPresets.closest("section")?.remove();
-    }
-
-    // Create preset section HTML
-    const presetsHTML = `
-      <section>
-        <h3>Camera Presets</h3>
-        <div class="preset-controls">
-          <input type="text" id="preset-name-input" placeholder="Preset name" />
-          <button id="save-preset-btn" class="btn-primary">Save Current as Preset</button>
-        </div>
-        <div id="preset-list" class="preset-list">
-          ${this.presets.map(p => `
-            <div class="preset-item">
-              <span class="preset-name">${p.name}</span>
-              <div class="preset-actions">
-                <button class="btn-small" onclick="app.loadPreset('${p.name}')">Load</button>
-                <button class="btn-small btn-danger" onclick="app.deletePreset('${p.name}')">Delete</button>
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      </section>
-    `;
-
-    // Insert preset section after health section
-    const healthSection = panel.querySelector(".settings-section");
-    if (healthSection) {
-      healthSection.insertAdjacentHTML('afterend', presetsHTML);
-    } else {
-      panel.insertAdjacentHTML('afterbegin', presetsHTML);
-    }
-
-    // Attach save preset handler
-    const savePresetBtn = document.getElementById("save-preset-btn");
-    if (savePresetBtn) {
-      savePresetBtn.addEventListener("click", () => this.savePreset());
+  async refreshHealthStats() {
+    try {
+      const healthMap = await invoke("get_stream_health");
+      this.healthStats.clear();
+      for (const [cameraId, health] of Object.entries(healthMap)) {
+        this.healthStats.set(cameraId, health);
+      }
+      this.updateHealthDisplay();
+    } catch (err) {
+      console.error("Failed to fetch stream health:", err);
+      this.updateHealthDisplay();
     }
   }
 
   updateHealthDisplay() {
     const container = document.getElementById("health-stats-container");
     if (!container) return; // Settings panel not open
-
-    // Constants for magic numbers
-    const MBPS_THRESHOLD_KBPS = 1000;
 
     // Clean up stale camera data from previousHealthValues
     const currentCameraIds = new Set(this.healthStats.keys());
@@ -1077,123 +990,98 @@ class StageView {
 
       const fpsEl = card.querySelector('[data-metric="fps"]');
       const bitrateEl = card.querySelector('[data-metric="bitrate"]');
-      const framesEl = card.querySelector('[data-metric="frames"]');
       const uptimeEl = card.querySelector('[data-metric="uptime"]');
+      const resolutionEl = card.querySelector('[data-metric="resolution"]');
+      const qualityEl = card.querySelector('[data-metric="quality"]');
+      const codecEl = card.querySelector('[data-metric="codec"]');
 
       // Get previous values for this camera
       const prevValues = this.previousHealthValues.get(cameraId) || {};
-      let hasChanged = false;
 
       // Update FPS
-      const fpsValue = health.fps.toFixed(1);
-      if (fpsEl) {
-        if (prevValues.fps !== fpsValue) {
-          fpsEl.textContent = fpsValue;
-          hasChanged = true;
-        }
+      const fpsValue = (health.fps ?? 0).toFixed(1);
+      if (fpsEl && prevValues.fps !== fpsValue) {
+        fpsEl.textContent = fpsValue;
       }
 
-      // Update Bitrate with Mbps conversion
-      const bitrateKbps = health.bitrate_kbps;
+      // Update Bitrate with Mbps conversion and hysteresis
+      const bitrateKbps = health.bitrate_kbps ?? 0;
+      const prevUsedMbps = prevValues.bitrateUnit === 'Mbps';
+      const useMbps = prevUsedMbps
+        ? bitrateKbps >= 900   // stay in Mbps until below 900
+        : bitrateKbps > 1000;  // switch to Mbps above 1000
       let bitrateText;
-      if (bitrateKbps > MBPS_THRESHOLD_KBPS) {
+      if (useMbps) {
         const bitrateMbps = Math.round(bitrateKbps / 10) / 100;
         bitrateText = `${bitrateMbps.toFixed(2)} Mbps`;
       } else {
         bitrateText = `${bitrateKbps.toFixed(0)} kbps`;
       }
-      if (bitrateEl) {
-        if (prevValues.bitrate !== bitrateText) {
-          bitrateEl.textContent = bitrateText;
-          hasChanged = true;
-        }
-      }
-
-      // Update Frames
-      const framesValue = health.frame_count.toLocaleString();
-      if (framesEl) {
-        if (prevValues.frames !== framesValue) {
-          framesEl.textContent = framesValue;
-          hasChanged = true;
-        }
+      if (bitrateEl && prevValues.bitrate !== bitrateText) {
+        bitrateEl.textContent = bitrateText;
       }
 
       // Update Uptime with simplified format (hours and minutes only)
-      const hours = Math.floor(health.uptime_secs / 3600);
-      const mins = Math.floor((health.uptime_secs % 3600) / 60);
+      const uptime_secs = health.uptime_secs ?? 0;
+      const hours = Math.floor(uptime_secs / 3600);
+      const mins = Math.floor((uptime_secs % 3600) / 60);
       let uptimeText;
       if (hours > 0) {
         uptimeText = `${hours}h ${mins}m`;
-      } else {
+      } else if (mins > 0) {
         uptimeText = `${mins}m`;
+      } else {
+        uptimeText = `${uptime_secs}s`;
       }
-      if (uptimeEl) {
-        if (prevValues.uptime !== uptimeText) {
-          uptimeEl.textContent = uptimeText;
-          hasChanged = true;
-        }
+      if (uptimeEl && prevValues.uptime !== uptimeText) {
+        uptimeEl.textContent = uptimeText;
+      }
+
+      // Update Resolution
+      const resolutionText = health.resolution || "Unknown";
+      if (resolutionEl && prevValues.resolution !== resolutionText) {
+        resolutionEl.textContent = resolutionText;
+      }
+
+      // Update Quality Setting
+      const qualityText = health.quality_setting || "--";
+      if (qualityEl && prevValues.quality !== qualityText) {
+        qualityEl.textContent = qualityText;
+      }
+
+      // Update Codec
+      const codecText = health.codec || "--";
+      if (codecEl && prevValues.codec !== codecText) {
+        codecEl.textContent = codecText;
       }
 
       // Store current values for next comparison
       this.previousHealthValues.set(cameraId, {
         fps: fpsValue,
         bitrate: bitrateText,
-        frames: framesValue,
-        uptime: uptimeText
+        bitrateUnit: useMbps ? 'Mbps' : 'kbps',
+        uptime: uptimeText,
+        resolution: resolutionText,
+        quality: qualityText,
+        codec: codecText
       });
+
+      // Determine health state based on FPS
+      let newState;
+      if (health.fps > 0) {
+        newState = 'online';
+      } else if (health.uptime_secs > 0) {
+        newState = 'warn';
+      } else {
+        newState = 'error';
+      }
+
+      // Only update attribute if state changed
+      const prevState = card.getAttribute('data-health-state');
+      if (prevState !== newState) {
+        card.setAttribute('data-health-state', newState);
+      }
     });
-  }
-
-  // ── Health Monitoring ───────────────────────────────────────────────────
-
-  startHealthMonitoring() {
-    // Clear any existing interval to prevent stacking
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-    }
-
-    // Check every 10 seconds
-    this.healthCheckInterval = setInterval(() => {
-      const now = Date.now();
-
-      this.cameras.forEach((cam) => {
-        const health = this.healthStats.get(cam.id);
-        if (!health) {
-          this.updateCameraHealthState(cam.id, 'offline');
-          return;
-        }
-
-        const lastFrameTime = health.last_frame_time || 0;
-        const offlineSeconds = (now - lastFrameTime) / 1000;
-
-        if (offlineSeconds > 300) {  // 5+ minutes
-          this.updateCameraHealthState(cam.id, 'error');
-        } else if (offlineSeconds > 60) {  // 1+ minute
-          this.updateCameraHealthState(cam.id, 'warn');
-        } else {
-          this.updateCameraHealthState(cam.id, 'online');
-        }
-      });
-    }, 10000);
-  }
-
-  updateCameraHealthState(cameraId, state) {
-    const prevState = this.cameraHealthStates.get(cameraId);
-    if (prevState === state) return;  // No change
-
-    this.cameraHealthStates.set(cameraId, state);
-
-    // Update health card visual state
-    const card = document.querySelector(`[data-camera-id="${cameraId}"]`);
-    if (card) {
-      card.dataset.healthState = state;
-    }
-
-    // Show notification for error state
-    if (state === 'error' && prevState !== 'error') {
-      const cam = this.cameras.find(c => c.id === cameraId);
-      this.showToast(`Camera "${cam?.name || 'Unknown'}" offline for 5+ minutes`, 'error');
-    }
   }
 
   showToast(message, type = 'info') {
@@ -1231,10 +1119,15 @@ class StageView {
 
     overlay.classList.remove("visible");
     panel.classList.remove("visible");
+    // Prevent clicks during close animation
+    overlay.style.pointerEvents = "none";
+    panel.style.pointerEvents = "none";
 
     setTimeout(() => {
       overlay.classList.add("hidden");
       panel.classList.add("hidden");
+      overlay.style.pointerEvents = "";
+      panel.style.pointerEvents = "";
     }, 300);
   }
 
@@ -1248,15 +1141,42 @@ class StageView {
 
     list.innerHTML = this.cameras
       .map(
-        (cam, i) => `
+        (cam, i) => {
+          const q = cam.codec_override?.quality || '';
+          const fm = cam.codec_override?.fps_mode;
+          let fpsVal = 'native';
+          if (fm && typeof fm === 'object' && fm.capped) fpsVal = String(fm.capped);
+          else if (fm === 'native') fpsVal = 'native';
+
+          return `
       <div class="camera-entry" data-index="${i}">
-        <span class="api-index" title="API Index: Use /api/solo/${i + 1}">${i + 1}</span>
-        <input type="text" placeholder="Camera name" value="${cam.name}" data-field="name" />
-        <input type="text" placeholder="rtp://224.1.2.4:4000" value="${cam.url}" data-field="url" />
-        <button class="btn-config" data-camera-index="${i}" title="Configure camera settings">⚙️</button>
+        <span class="api-index" title="API: /api/solo/${i + 1}">Camera ${i + 1}</span>
+        <input type="text" placeholder="Camera name" value="${escapeHtml(cam.name)}" data-field="name" />
+        <input type="text" placeholder="rtp://224.1.2.4:4000" value="${escapeHtml(cam.url)}" data-field="url" />
+        <div class="cam-overrides">
+          <div class="cam-override-field">
+            <span class="cam-override-label">Quality</span>
+            <select class="cam-quality" title="Quality override">
+              <option value=""${q === '' ? ' selected' : ''}>Global</option>
+              <option value="low"${q === 'low' ? ' selected' : ''}>Low</option>
+              <option value="medium"${q === 'medium' ? ' selected' : ''}>Med</option>
+              <option value="high"${q === 'high' ? ' selected' : ''}>High</option>
+            </select>
+          </div>
+          <div class="cam-override-field">
+            <span class="cam-override-label">FPS</span>
+            <select class="cam-fps" title="FPS override">
+              <option value="native"${fpsVal === 'native' ? ' selected' : ''}>Native</option>
+              <option value="5"${fpsVal === '5' ? ' selected' : ''}>5 fps</option>
+              <option value="10"${fpsVal === '10' ? ' selected' : ''}>10 fps</option>
+              <option value="15"${fpsVal === '15' ? ' selected' : ''}>15 fps</option>
+            </select>
+          </div>
+        </div>
         <button class="remove-btn" data-remove-index="${i}">✕</button>
       </div>
-    `
+    `;
+        }
       )
       .join("");
 
@@ -1284,7 +1204,21 @@ class StageView {
   removeCameraField(index) {
     const list = document.getElementById("camera-list");
     const entries = list.querySelectorAll(".camera-entry");
-    if (entries[index]) entries[index].remove();
+    if (entries[index]) {
+      entries[index].remove();
+      // Re-index remaining entries to prevent stale closure indices
+      list.querySelectorAll('.camera-entry').forEach((entry, i) => {
+        entry.dataset.index = i;
+        const removeBtn = entry.querySelector('[data-remove-index]');
+        if (removeBtn) removeBtn.dataset.removeIndex = i;
+      });
+      // Re-bind remove handlers with correct indices
+      list.querySelectorAll('[data-remove-index]').forEach(btn => {
+        const newBtn = btn.cloneNode(true);
+        btn.parentNode.replaceChild(newBtn, btn);
+        newBtn.addEventListener('click', () => this.removeCameraField(parseInt(newBtn.dataset.removeIndex)));
+      });
+    }
   }
 
   async saveSettings() {
@@ -1304,559 +1238,70 @@ class StageView {
           name: name || `Camera ${cameras.length + 1}`,
           url,
         };
-        // Preserve codec_override if it exists
-        if (existingCamera?.codec_override) {
+        // Read inline quality/fps dropdowns
+        const qualitySel = entry.querySelector('.cam-quality');
+        const fpsSel = entry.querySelector('.cam-fps');
+        if (qualitySel && fpsSel) {
+          const qVal = qualitySel.value;
+          const fVal = fpsSel.value;
+          if (qVal !== '' || fVal !== 'native') {
+            camera.codec_override = {
+              quality: qVal || 'medium',
+              fps_mode: fVal === 'native' ? 'native' : { capped: parseInt(fVal) },
+            };
+          }
+        } else if (existingCamera?.codec_override) {
           camera.codec_override = existingCamera.codec_override;
         }
         cameras.push(camera);
       }
     });
 
-    const intervalMinutes = parseInt(
-      document.getElementById("shuffle-interval").value,
-      10
-    );
-    const shuffleIntervalSecs = Math.max(60, (intervalMinutes || 15) * 60);
+    const intervalHours = parseInt(document.getElementById("shuffle-interval-hours").value, 10) || 0;
+    const intervalMins = parseInt(document.getElementById("shuffle-interval-minutes").value, 10) || 0;
+    const totalMinutes = Math.max(1, Math.min(1440, intervalHours * 60 + intervalMins || 15));
+    const shuffleIntervalSecs = totalMinutes * 60;
 
     const showStatusDots = document.getElementById("show-status-dots").checked;
     const showCameraNames = document.getElementById("show-camera-names").checked;
-    const quality = document.getElementById("quality-select").value;
     const apiPort = parseInt(document.getElementById("api-port").value, 10) || 8090;
 
-    // Save codec settings
+    // Save quality setting
     const streamConfig = {
-      codec: document.getElementById("codec-select").value,
-      encoder: document.getElementById("encoder-select").value,
       quality: document.getElementById("quality-preset-select").value,
     };
 
-    const config = {
-      cameras,
-      shuffle_interval_secs: shuffleIntervalSecs,
-      show_status_dots: showStatusDots,
-      show_camera_names: showCameraNames,
-      quality,
-      api_port: apiPort,
-      layouts: this.layouts,
-      active_layout: this.activeLayout,
-      stream_config: streamConfig,
-    };
-
-    await invoke("save_config", { config });
-
-    this.cameras = cameras;
-    this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
-    this.shuffleIntervalSecs = shuffleIntervalSecs;
-    this.showStatusDots = showStatusDots;
-    this.showCameraNames = showCameraNames;
-    this.quality = quality;
-    this.apiPort = apiPort;
-
-    // Restart streams with new camera list and codec settings
-    await invoke("stop_streams");
-    this.render();
-    this.startShuffleTimer();
-    if (this.cameras.length > 0) {
-      await invoke("start_streams");
-    }
-    this.closeSettings();
-  }
-
-  // ── Camera Configuration Modal ──────────────────────────────────────────
-
-  openCameraConfigModal(cameraIndex) {
-    const camera = this.cameras[cameraIndex];
-    if (!camera) return;
-
-    this.editingCameraIndex = cameraIndex;
-
-    const modal = document.getElementById('camera-config-modal');
-    const qualitySelect = document.getElementById('modal-quality-preset');
-    const fpsMode = document.getElementById('modal-fps-mode');
-    const fpsValue = document.getElementById('modal-fps-value');
-    const fpsValueContainer = document.getElementById('modal-fps-value-container');
-
-    // Load current settings or defaults
-    if (camera.codec_override) {
-      qualitySelect.value = camera.codec_override.quality || '';
-
-      if (camera.codec_override.fps_mode === 'native') {
-        fpsMode.value = 'native';
-        fpsValueContainer.style.display = 'none';
-      } else if (typeof camera.codec_override.fps_mode === 'object' && camera.codec_override.fps_mode.capped) {
-        fpsMode.value = 'capped';
-        fpsValue.value = camera.codec_override.fps_mode.capped;
-        fpsValueContainer.style.display = 'block';
-      }
-    } else {
-      // No override - show "Use Global Settings"
-      qualitySelect.value = '';
-      fpsMode.value = 'native';
-      fpsValueContainer.style.display = 'none';
-    }
-
-    modal.style.display = 'flex';
-  }
-
-  closeCameraConfigModal() {
-    const modal = document.getElementById('camera-config-modal');
-    modal.style.display = 'none';
-    this.editingCameraIndex = null;
-  }
-
-  async saveCameraConfig() {
-    if (this.editingCameraIndex === null) return;
-
-    const camera = this.cameras[this.editingCameraIndex];
-    if (!camera) return;
-
-    const quality = document.getElementById('modal-quality-preset').value;
-    const fpsMode = document.getElementById('modal-fps-mode').value;
-
-    // If "Use Global Settings" is selected, remove the override
-    if (quality === '') {
-      delete camera.codec_override;
-    } else {
-      // Build codec_override object
-      let fps_mode;
-      if (fpsMode === 'native') {
-        fps_mode = 'native';
-      } else {
-        // Validate FPS value
-        const fpsValue = parseInt(document.getElementById('modal-fps-value').value, 10);
-        if (isNaN(fpsValue) || fpsValue < 1 || fpsValue > 60) {
-          this.showToast('FPS value must be between 1 and 60', 'error');
-          return;
-        }
-        fps_mode = { capped: fpsValue };
-      }
-
-      camera.codec_override = {
-        quality: quality,
-        fps_mode: fps_mode
-      };
-    }
-
-    this.closeCameraConfigModal();
-
-    // Save config with error handling
     try {
+      // Read existing config to preserve window_state and other fields
       const config = await invoke("get_config");
-      config.cameras = this.cameras;
+      config.cameras = cameras;
+      config.shuffle_interval_secs = shuffleIntervalSecs;
+      config.show_status_dots = showStatusDots;
+      config.show_camera_names = showCameraNames;
+      config.api_port = apiPort;
+      config.stream_config = streamConfig;
+
       await invoke("save_config", { config });
 
-      // Restart streams to apply new settings
+      this.cameras = cameras;
+      this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
+      this.shuffleIntervalSecs = shuffleIntervalSecs;
+      this.showStatusDots = showStatusDots;
+      this.showCameraNames = showCameraNames;
+      this.apiPort = apiPort;
+
+      // Restart streams with new camera list and codec settings
+      this._stopAllReaders();
       await invoke("stop_streams");
+      this.render();
+      this.startShuffleTimer();
       if (this.cameras.length > 0) {
         await invoke("start_streams");
       }
-
-      this.showToast(`Settings updated for ${camera.name}`, 'success');
-    } catch (e) {
-      console.error("Failed to save camera config:", e);
-      this.showToast("Failed to save settings: " + e, 'error');
-    }
-  }
-
-  // ── Layout Editor ───────────────────────────────────────────────────────
-
-  openLayoutEditor() {
-    const overlay = document.getElementById('layout-editor-overlay');
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-
-    // Load current or create new layout
-    const currentLayout = this.layouts.find(l => l.name === this.activeLayout) || {
-      name: 'New Layout',
-      layout_type: 'grid',
-      positions: [],
-      pip_config: null
-    };
-
-    nameInput.value = currentLayout.name;
-    typeSelect.value = currentLayout.layout_type;
-
-    this.renderCameraPositionEditors(currentLayout);
-    overlay.style.display = 'flex';
-  }
-
-  closeLayoutEditor() {
-    document.getElementById('layout-editor-overlay').style.display = 'none';
-  }
-
-  renderCameraPositionEditors(layout) {
-    const container = document.getElementById('layout-camera-list');
-
-    if (layout.layout_type === 'grid') {
-      container.innerHTML = '<p class="hint">Grid layout automatically positions cameras. No manual positioning needed.</p>';
-      return;
-    }
-
-    if (layout.layout_type === 'pip') {
-      this.renderPipConfig(layout);
-      return;
-    }
-
-    // Fallback for any other layout type
-    container.innerHTML = '<p class="hint">Grid layout automatically positions cameras. No manual positioning needed.</p>';
-  }
-
-  handleLayoutTypeChange(newType) {
-    const nameInput = document.getElementById('layout-name-input');
-    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
-
-    const layout = {
-      name: nameInput.value || 'New Layout',
-      layout_type: newType,
-      positions: []
-    };
-
-    if (newType === 'pip') {
-      // Initialize PIP config if it doesn't exist
-      if (currentLayout?.pip_config) {
-        layout.pip_config = currentLayout.pip_config;
-      } else {
-        // Default PIP config: first camera as main, no overlays
-        layout.pip_config = {
-          main_camera_id: this.cameras[0]?.id || '',
-          overlays: []
-        };
-      }
-    }
-
-    this.renderCameraPositionEditors(layout);
-  }
-
-
-  // ── PIP Editor Methods ──────────────────────────────────────────────────
-
-  getCurrentPipLayout() {
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-    const mainCameraId = document.getElementById('pip-main-camera').value;
-    const overlays = this.getActivePipOverlays();
-
-    return {
-      name: nameInput.value || 'New Layout',
-      layout_type: typeSelect.value,
-      pip_config: {
-        main_camera_id: mainCameraId,
-        overlays: overlays
-      }
-    };
-  }
-
-  renderPipConfig(layout) {
-    const container = document.getElementById('layout-camera-list');
-    const pipConfig = layout.pip_config || {
-      main_camera_id: this.cameras[0]?.id || '',
-      overlays: []
-    };
-
-    let html = `
-      <div class="pip-editor">
-        <div class="pip-main-camera">
-          <label>Main Camera:</label>
-          <select id="pip-main-camera">
-            ${this.cameras.map(cam => `
-              <option value="${cam.id}" ${cam.id === pipConfig.main_camera_id ? 'selected' : ''}>
-                ${cam.name}
-              </option>
-            `).join('')}
-          </select>
-        </div>
-
-        <h4 class="pip-section-header">Overlays</h4>
-        <div id="pip-overlays-container">
-          ${pipConfig.overlays.map((overlay, idx) => this.renderPipOverlay(overlay, idx)).join('')}
-        </div>
-
-        <button id="add-pip-overlay" class="btn-secondary pip-add-button">+ Add Overlay</button>
-      </div>
-    `;
-
-    container.innerHTML = html;
-
-    // Event listeners are attached once in bindUIEvents() to prevent memory leaks
-  }
-
-  validateMainCameraSelection() {
-    const mainCameraId = document.getElementById('pip-main-camera').value;
-    const overlays = this.getActivePipOverlays();
-
-    // Check if main camera is also used in any overlay
-    const conflict = overlays.find(overlay => overlay.camera_id === mainCameraId);
-
-    if (conflict) {
-      alert('The main camera cannot also be used as an overlay. Please remove it from overlays first.');
-      // Optionally, you could auto-remove the conflicting overlay here
-    }
-  }
-
-  renderPipOverlay(overlay, index) {
-    return `
-      <div class="pip-overlay-item" data-overlay-index="${index}">
-        <div class="pip-overlay-header">
-          <span class="pip-overlay-label">Overlay ${index + 1}</span>
-          <button class="pip-overlay-remove btn-danger btn-small">Remove</button>
-        </div>
-
-        <div class="pip-overlay-controls">
-          <label>
-            Camera:
-            <select class="pip-overlay-camera" data-overlay-index="${index}">
-              ${this.cameras.map(cam => `
-                <option value="${cam.id}" ${cam.id === overlay.camera_id ? 'selected' : ''}>
-                  ${cam.name}
-                </option>
-              `).join('')}
-            </select>
-          </label>
-
-          <label>
-            Corner:
-            <div class="corner-selector">
-              <button data-corner="TL" class="${overlay.corner === 'TL' ? 'active' : ''}" title="Top Left">↖</button>
-              <button data-corner="TR" class="${overlay.corner === 'TR' ? 'active' : ''}" title="Top Right">↗</button>
-              <button data-corner="BL" class="${overlay.corner === 'BL' ? 'active' : ''}" title="Bottom Left">↙</button>
-              <button data-corner="BR" class="${overlay.corner === 'BR' ? 'active' : ''}" title="Bottom Right">↘</button>
-            </div>
-          </label>
-
-          <label>
-            Size:
-            <select class="pip-overlay-size" data-overlay-index="${index}">
-              <option value="10" ${overlay.size_percent === 10 ? 'selected' : ''}>10%</option>
-              <option value="15" ${overlay.size_percent === 15 ? 'selected' : ''}>15%</option>
-              <option value="20" ${overlay.size_percent === 20 ? 'selected' : ''}>20%</option>
-              <option value="25" ${overlay.size_percent === 25 ? 'selected' : ''}>25%</option>
-              <option value="30" ${overlay.size_percent === 30 ? 'selected' : ''}>30%</option>
-              <option value="35" ${overlay.size_percent === 35 ? 'selected' : ''}>35%</option>
-              <option value="40" ${overlay.size_percent === 40 ? 'selected' : ''}>40%</option>
-            </select>
-          </label>
-        </div>
-      </div>
-    `;
-  }
-
-  addPipOverlay() {
-    console.log('[PIP] addPipOverlay called');
-
-    const currentOverlays = this.getActivePipOverlays();
-    console.log('[PIP] Current overlays:', currentOverlays);
-
-    // Find an available corner
-    const corners = ['TL', 'TR', 'BL', 'BR'];
-    const usedCorners = currentOverlays.map(o => o.corner);
-    const availableCorner = corners.find(c => !usedCorners.includes(c));
-
-    if (!availableCorner) {
-      console.log('[PIP] All corners occupied');
-      alert('All corners are occupied. Remove an overlay before adding a new one.');
-      return;
-    }
-
-    // Find an available camera
-    const mainCameraId = document.getElementById('pip-main-camera')?.value;
-    console.log('[PIP] Main camera:', mainCameraId);
-
-    const availableCamera = this.cameras.find(c => c.id !== mainCameraId);
-    console.log('[PIP] Available camera:', availableCamera);
-
-    if (!availableCamera) {
-      console.log('[PIP] No available cameras');
-      alert('No available cameras for overlay.');
-      return;
-    }
-
-    const newOverlay = {
-      camera_id: availableCamera.id,
-      corner: availableCorner,
-      size_percent: 25
-    };
-
-    console.log('[PIP] Adding overlay:', newOverlay);
-    currentOverlays.push(newOverlay);
-
-    const layout = this.getCurrentPipLayout();
-    console.log('[PIP] Rendering with layout:', layout);
-    this.renderPipConfig(layout);
-  }
-
-  removePipOverlay(index) {
-    const currentOverlays = this.getActivePipOverlays();
-    currentOverlays.splice(index, 1);
-
-    // Re-render using the helper method
-    const layout = this.getCurrentPipLayout();
-    this.renderPipConfig(layout);
-  }
-
-  selectCorner(overlayIndex, corner) {
-    const currentOverlays = this.getActivePipOverlays();
-
-    // Check for corner conflict
-    if (this.validateCornerConflict(corner, overlayIndex)) {
-      alert(`Corner ${corner} is already occupied by another overlay.`);
-      return;
-    }
-
-    // Update the corner for this overlay
-    currentOverlays[overlayIndex].corner = corner;
-
-    // Re-render using the helper method
-    const layout = this.getCurrentPipLayout();
-    this.renderPipConfig(layout);
-  }
-
-  validateCornerConflict(corner, excludeIndex = -1) {
-    const overlays = this.getActivePipOverlays();
-    return overlays.some((overlay, idx) => {
-      if (idx === excludeIndex) return false;
-      return overlay.corner === corner;
-    });
-  }
-
-  getActivePipOverlays() {
-    const overlayItems = document.querySelectorAll('.pip-overlay-item');
-    const overlays = [];
-
-    overlayItems.forEach((item, idx) => {
-      const cameraSelect = item.querySelector('.pip-overlay-camera');
-      const sizeSelect = item.querySelector('.pip-overlay-size');
-      const activeCornerBtn = item.querySelector('.corner-selector button.active');
-
-      if (cameraSelect && sizeSelect && activeCornerBtn) {
-        overlays.push({
-          camera_id: cameraSelect.value,
-          corner: activeCornerBtn.dataset.corner,
-          size_percent: parseInt(sizeSelect.value)
-        });
-      }
-    });
-
-    return overlays;
-  }
-
-  async saveCurrentLayout() {
-    const nameInput = document.getElementById('layout-name-input');
-    const typeSelect = document.getElementById('layout-type-select');
-    const layoutName = nameInput.value.trim() || 'New Layout';
-    const layoutType = typeSelect.value;
-
-    const positions = [];
-    let pipConfig = null;
-
-    if (layoutType === 'pip') {
-      // Collect PIP config
-      const mainCameraId = document.getElementById('pip-main-camera')?.value;
-      const overlays = this.getActivePipOverlays();
-
-      pipConfig = {
-        main_camera_id: mainCameraId,
-        overlays: overlays
-      };
-    }
-
-    const newLayout = {
-      name: layoutName,
-      layout_type: layoutType,
-      positions: positions
-    };
-
-    // Add pip_config if it exists
-    if (pipConfig) {
-      newLayout.pip_config = pipConfig;
-    }
-
-    // Update or add layout
-    const existingIndex = this.layouts.findIndex(l => l.name === layoutName);
-    if (existingIndex >= 0) {
-      this.layouts[existingIndex] = newLayout;
-    } else {
-      this.layouts.push(newLayout);
-    }
-
-    // Save to config
-    const config = await invoke("get_config");
-    config.layouts = this.layouts;
-    await invoke("save_config", { config });
-
-    this.closeLayoutEditor();
-  }
-
-  async applyCurrentLayout() {
-    await this.saveCurrentLayout();
-
-    const nameInput = document.getElementById('layout-name-input');
-    const layoutName = nameInput.value.trim() || 'New Layout';
-
-    this.activeLayout = layoutName;
-    const currentLayout = this.layouts.find(l => l.name === this.activeLayout);
-    this.layoutMode = currentLayout?.layout_type || 'grid';
-
-    // Save active layout to config
-    const config = await invoke("get_config");
-    config.active_layout = this.activeLayout;
-    await invoke("save_config", { config });
-
-    this.render();
-    this.closeLayoutEditor();
-  }
-
-  // ── Camera Presets ──────────────────────────────────────────────────────
-
-  async savePreset() {
-    const nameInput = document.getElementById("preset-name-input");
-    const name = nameInput.value.trim();
-
-    if (!name) {
-      alert("Please enter a preset name");
-      return;
-    }
-
-    try {
-      await invoke("save_preset", { name });
-      const config = await invoke("get_config");
-      this.presets = config.presets || [];
-      nameInput.value = "";
-      this.injectPresetSection(); // Refresh preset list
-    } catch (err) {
-      console.error("Failed to save preset:", err);
-      alert("Failed to save preset");
-    }
-  }
-
-  async loadPreset(name) {
-    try {
-      const cameras = await invoke("load_preset", { name });
-      this.cameras = cameras;
-      this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
-      const config = await invoke("get_config");
-      config.cameras = cameras;
-      await invoke("save_config", { config });
-      await invoke("stop_streams");
-      this.render();
-      await invoke("start_streams");
       this.closeSettings();
     } catch (err) {
-      console.error("Failed to load preset:", err);
-      alert("Failed to load preset");
-    }
-  }
-
-  async deletePreset(name) {
-    if (!confirm(`Delete preset "${name}"?`)) return;
-
-    try {
-      await invoke("delete_preset", { name });
-      const config = await invoke("get_config");
-      this.presets = config.presets || [];
-      this.injectPresetSection(); // Refresh preset list
-    } catch (err) {
-      console.error("Failed to delete preset:", err);
-      alert("Failed to delete preset");
+      console.error("Failed to save settings:", err);
+      this.showToast("Failed to save settings: " + err, 'error');
     }
   }
 
@@ -1889,7 +1334,10 @@ class StageView {
       this.cameras[targetIndex] = temp;
       this.displayOrder = this.cameras.map((_, i) => i); // resync display order after manual reorder
       this.render();
-      this.saveCameraOrder();
+      this.saveCameraOrder().catch(err => {
+        console.error("Failed to save camera order:", err);
+        this.showToast("Failed to save camera order", 'error');
+      });
     }
   }
 
@@ -1904,11 +1352,42 @@ class StageView {
     await invoke("save_config", { config });
   }
 
+  // ── Serialized Config Save ──────────────────────────────────────────────
+
+  /**
+   * Serializes config save operations to prevent concurrent get_config/save_config races.
+   * @param {Function} mutator - async function that receives config, mutates it, and returns it
+   */
+  async serializedConfigSave(mutator) {
+    // Chain onto any in-flight save to serialize access
+    const doSave = async () => {
+      const config = await invoke("get_config");
+      const updated = await mutator(config);
+      if (updated) {
+        await invoke("save_config", { config: updated });
+      }
+    };
+
+    if (this._configSavePromise) {
+      this._configSavePromise = this._configSavePromise.then(doSave, doSave);
+    } else {
+      this._configSavePromise = doSave();
+    }
+
+    try {
+      await this._configSavePromise;
+    } finally {
+      // Clear the chain when it settles so we don't keep old promises
+      this._configSavePromise = null;
+    }
+  }
+
   // ── Window State Persistence ────────────────────────────────────────────
 
   async setupWindowStatePersistence() {
     const currentWindow = getCurrentWindow();
     let saveTimeout;
+    let lastSavedState = null;
 
     const saveWindowState = async () => {
       clearTimeout(saveTimeout);
@@ -1917,23 +1396,62 @@ class StageView {
           const position = await currentWindow.outerPosition();
           const size = await currentWindow.outerSize();
           const maximized = await currentWindow.isMaximized();
-          const config = await invoke("get_config");
-          config.window_state = {
-            x: position.x,
-            y: position.y,
-            width: size.width,
-            height: size.height,
-            maximized
-          };
-          await invoke("save_config", { config });
+          const newState = { x: position.x, y: position.y, width: size.width, height: size.height, maximized };
+
+          // Skip save if nothing changed
+          if (lastSavedState &&
+              lastSavedState.x === newState.x && lastSavedState.y === newState.y &&
+              lastSavedState.width === newState.width && lastSavedState.height === newState.height &&
+              lastSavedState.maximized === newState.maximized) {
+            return;
+          }
+
+          await this.serializedConfigSave(async (config) => {
+            config.window_state = newState;
+            return config;
+          });
+          lastSavedState = newState;
         } catch (err) {
           console.error("Failed to save window state:", err);
         }
-      }, 500);
+      }, 2000);
     };
 
     await currentWindow.listen("tauri://resize", saveWindowState);
     await currentWindow.listen("tauri://move", saveWindowState);
+  }
+
+  setupIdleHiding() {
+    const IDLE_TIMEOUT = 10000; // 10 seconds
+    const toolbar = document.getElementById('toolbar');
+
+    const showUI = () => {
+      this._isIdle = false;
+      toolbar.classList.add('visible');
+      document.body.style.cursor = '';
+
+      clearTimeout(this._idleTimer);
+      this._idleTimer = setTimeout(hideUI, IDLE_TIMEOUT);
+    };
+
+    const hideUI = async () => {
+      this._isIdle = true;
+      toolbar.classList.remove('visible');
+
+      // Hide cursor only in fullscreen
+      try {
+        const win = getCurrentWindow();
+        if (await win.isFullscreen()) {
+          document.body.style.cursor = 'none';
+        }
+      } catch (_) {}
+    };
+
+    document.addEventListener('mousemove', showUI);
+    document.addEventListener('mousedown', showUI);
+
+    // Start visible, then begin idle timer
+    showUI();
   }
 }
 

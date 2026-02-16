@@ -42,3 +42,13 @@ desktop.ini
 src-tauri/binaries/*.exe
 src-tauri/binaries/ffmpeg*
 !src-tauri/binaries/.gitkeep
+
+# Dev artifacts
+DEPLOYMENT-READY.md
+SOAK-TEST-README.md
+TASK-*.md
+*.ps1
+soak-test-results.csv
+nul
+Untitled.jpg
+verify-frame-blocking.js

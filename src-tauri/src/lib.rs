@@ -1,9 +1,9 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -18,28 +18,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum CodecType {
-    H264,
-    MJPEG,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum EncoderType {
-    Auto,         // Try hardware, fallback to software
-    Nvenc,        // Force NVIDIA
-    QSV,          // Force Intel
-    Videotoolbox, // Force macOS
-    X264,         // Force software H.264
-    MJPEG,        // Force MJPEG
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
 pub enum Quality {
-    Low,     // 720p max, 5 fps
-    Medium,  // 1080p max, 10 fps
-    High,    // Original, 15 fps
+    Low,     // 720p max, 10 fps
+    Medium,  // 1080p max, 15 fps
+    High,    // Original resolution, uncapped fps
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -73,41 +55,18 @@ impl Default for CameraCodecSettings {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct StreamConfig {
-    pub codec: CodecType,
-    pub encoder: EncoderType,
     pub quality: Quality,
 }
 
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            codec: CodecType::MJPEG,      // Backward compatible
-            encoder: EncoderType::MJPEG,
             quality: Quality::Medium,
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct AvailableEncoders {
-    pub nvenc: bool,
-    pub qsv: bool,
-    pub videotoolbox: bool,
-    pub x264: bool,  // Always true
-}
-
-impl Default for AvailableEncoders {
-    fn default() -> Self {
-        Self {
-            nvenc: false,
-            qsv: false,
-            videotoolbox: false,
-            x264: true,
-        }
-    }
-}
-
-// ── Camera and Layout Models ─────────────────────────────────────────────────
+// ── Camera Models ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Camera {
@@ -116,86 +75,6 @@ pub struct Camera {
     pub url: String,
     #[serde(default)]
     pub codec_override: Option<CameraCodecSettings>,
-}
-
-// Deprecated: Used for backward compatibility with custom layouts.
-// New layouts should use pip_config instead.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CameraPosition {
-    pub camera_id: String,
-    pub x: f32,      // 0.0 - 1.0 (percentage of viewport width)
-    pub y: f32,      // 0.0 - 1.0 (percentage of viewport height)
-    pub width: f32,  // 0.0 - 1.0 (percentage of viewport width)
-    pub height: f32, // 0.0 - 1.0 (percentage of viewport height)
-    pub z_index: i32, // For picture-in-picture layering
-}
-
-/// Corner position for picture-in-picture overlay
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Corner {
-    TL,
-    TR,
-    BL,
-    BR,
-}
-
-/// Custom deserializer for size_percent to enforce 10-40 range
-fn deserialize_size_percent<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = u8::deserialize(deserializer)?;
-    if (10..=40).contains(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format!(
-            "size_percent must be between 10 and 40, got {}",
-            value
-        )))
-    }
-}
-
-/// Picture-in-picture overlay configuration
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PipOverlay {
-    pub camera_id: String,
-    pub corner: Corner,
-    #[serde(deserialize_with = "deserialize_size_percent")]
-    pub size_percent: u8, // 10-40
-}
-
-/// Picture-in-picture layout configuration
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PipConfig {
-    pub main_camera_id: String,
-    pub overlays: Vec<PipOverlay>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct LayoutConfig {
-    pub name: String,
-    pub layout_type: String, // "grid", "pip"
-    pub positions: Vec<CameraPosition>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pip_config: Option<PipConfig>,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            name: "Default Grid".into(),
-            layout_type: "grid".into(),
-            positions: vec![],
-            pip_config: None,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CameraPreset {
-    pub name: String,
-    pub cameras: Vec<Camera>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -221,16 +100,8 @@ pub struct AppConfig {
     pub show_status_dots: bool,
     #[serde(default = "default_true")]
     pub show_camera_names: bool,
-    #[serde(default = "default_quality")]
-    pub quality: String,  // Deprecated, use stream_config.quality
     #[serde(default = "default_api_port")]
     pub api_port: u16,
-    #[serde(default)]
-    pub layouts: Vec<LayoutConfig>,
-    #[serde(default = "default_active_layout")]
-    pub active_layout: String, // Name of active layout
-    #[serde(default)]
-    pub presets: Vec<CameraPreset>,
     #[serde(default)]
     pub window_state: WindowState,
     #[serde(default)]
@@ -238,9 +109,7 @@ pub struct AppConfig {
 }
 
 fn default_true() -> bool { true }
-fn default_quality() -> String { "medium".into() }
 fn default_api_port() -> u16 { 8090 }
-fn default_active_layout() -> String { "Default Grid".into() }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -249,21 +118,11 @@ impl Default for AppConfig {
             shuffle_interval_secs: 900,
             show_status_dots: true,
             show_camera_names: true,
-            quality: "medium".into(),
             api_port: 8090,
-            layouts: vec![LayoutConfig::default()],
-            active_layout: "Default Grid".into(),
-            presets: vec![],
             window_state: WindowState::default(),
             stream_config: StreamConfig::default(),
         }
     }
-}
-
-#[derive(Serialize, Clone)]
-struct FrameEvent {
-    camera_id: String,
-    data: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -286,6 +145,9 @@ pub struct StreamHealth {
     pub frame_count: u64,
     pub last_frame_at: u64, // Unix timestamp in milliseconds
     pub uptime_secs: u64,
+    pub resolution: Option<String>, // e.g. "1920x1080"
+    pub quality_setting: String, // "Low", "Medium", "High"
+    pub codec: String, // "MJPEG", "H264"
 }
 
 #[derive(Serialize, Clone)]
@@ -298,7 +160,6 @@ struct StreamHealthEvent {
 struct StreamErrorEvent {
     camera_id: String,
     error: String,
-    encoder: String,
 }
 
 // ── Buffer Pool ──────────────────────────────────────────────────────────────
@@ -318,11 +179,14 @@ impl BufferPool {
     }
 
     fn acquire(&self) -> Vec<u8> {
-        self.buffers
-            .lock()
-            .expect("BufferPool mutex poisoned - this indicates a panic in another thread")
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(64 * 1024))
+        let mut pool = match self.buffers.lock() {
+            Ok(p) => p,
+            Err(poisoned) => {
+                error!("BufferPool mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        pool.pop().unwrap_or_else(|| Vec::with_capacity(64 * 1024))
     }
 
     fn release(&self, mut buf: Vec<u8>) {
@@ -347,48 +211,61 @@ struct AppState {
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
     stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
     buffer_pool: BufferPool, // Reusable buffer pool for frame processing
-    available_encoders: Mutex<AvailableEncoders>,
+    frame_broadcasters: Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Arc<Vec<u8>>>>>>, // camera_id -> frame broadcaster (Arc to avoid cloning ~200KB per frame)
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn get_config(state: State<AppState>) -> AppConfig {
-    state.config.lock().unwrap().clone()
+fn get_config(state: State<AppState>) -> Result<AppConfig, String> {
+    let config = state.config.lock()
+        .map_err(|_| "Config mutex poisoned - please restart application".to_string())?
+        .clone();
+    Ok(config)
 }
 
 #[tauri::command]
 fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
-    *state.config.lock().unwrap() = config;
+    *state.config.lock()
+        .map_err(|_| "Config mutex poisoned - please restart application".to_string())? = config;
     Ok(())
 }
 
 #[tauri::command]
 fn start_streams(state: State<AppState>, app: AppHandle) {
-    // Stop any existing streams first
-    {
-        let mut tasks = state.stream_tasks.lock().unwrap();
-        for (_, handle) in tasks.drain() {
-            handle.abort();
+    // Clone config first, then acquire stream_tasks once to avoid lock ordering issues
+    let config = match state.config.lock() {
+        Ok(cfg) => cfg.clone(),
+        Err(_) => {
+            error!("Config mutex poisoned, cannot start streams");
+            return;
         }
+    };
+    let ffmpeg_path = state.ffmpeg_path.clone();
+
+    let mut tasks = match state.stream_tasks.lock() {
+        Ok(t) => t,
+        Err(_) => {
+            error!("stream_tasks mutex poisoned, cannot start streams");
+            return;
+        }
+    };
+
+    // Stop any existing streams first
+    for (_, handle) in tasks.drain() {
+        handle.abort();
     }
 
-    let config = state.config.lock().unwrap().clone();
-    let ffmpeg_path = state.ffmpeg_path.clone();
-    let mut tasks = state.stream_tasks.lock().unwrap();
-
-    let quality = config.quality.clone();
     for camera in &config.cameras {
         let cam_id = camera.id.clone();
         let cam_url = camera.url.clone();
         let ffmpeg = ffmpeg_path.clone();
         let app_handle = app.clone();
-        let q = quality.clone();
 
         let handle = tauri::async_runtime::spawn(async move {
-            stream_camera(app_handle, ffmpeg, cam_id, cam_url, q).await;
+            stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
         });
 
         tasks.insert(camera.id.clone(), handle);
@@ -396,17 +273,44 @@ fn start_streams(state: State<AppState>, app: AppHandle) {
 }
 
 #[tauri::command]
-fn stop_streams(state: State<AppState>) {
-    let mut tasks = state.stream_tasks.lock().unwrap();
+fn stop_streams(state: State<AppState>, app: AppHandle) {
+    let mut tasks = match state.stream_tasks.lock() {
+        Ok(t) => t,
+        Err(_) => {
+            error!("stream_tasks mutex poisoned in stop_streams");
+            return;
+        }
+    };
+    let camera_ids: Vec<String> = tasks.keys().cloned().collect();
     for (_, handle) in tasks.drain() {
         handle.abort();
+    }
+    // Clear stale health data and emit offline status
+    if let Ok(mut health) = state.stream_health.lock() {
+        health.clear();
+    }
+    if let Ok(mut attempts) = state.reconnect_attempts.lock() {
+        attempts.clear();
+    }
+    drop(tasks);
+    for id in camera_ids {
+        let _ = app.emit("camera-status", CameraStatusEvent {
+            camera_id: id,
+            status: "offline".to_string(),
+        });
     }
 }
 
 #[tauri::command]
 fn solo_camera(state: State<AppState>, _app: AppHandle, camera_id: String) {
     // Stop all streams except the solo'd one — the solo stream keeps running
-    let mut tasks = state.stream_tasks.lock().unwrap();
+    let mut tasks = match state.stream_tasks.lock() {
+        Ok(t) => t,
+        Err(_) => {
+            error!("stream_tasks mutex poisoned in solo_camera");
+            return;
+        }
+    };
     let ids_to_remove: Vec<String> = tasks
         .keys()
         .filter(|id| **id != camera_id)
@@ -424,11 +328,21 @@ fn solo_camera(state: State<AppState>, _app: AppHandle, camera_id: String) {
 fn grid_view(state: State<AppState>, app: AppHandle) {
     // Only start streams for cameras that aren't already running.
     // This avoids killing + restarting the solo'd camera that's still fine.
-    let config = state.config.lock().unwrap().clone();
+    let config = match state.config.lock() {
+        Ok(cfg) => cfg.clone(),
+        Err(_) => {
+            error!("Config mutex poisoned in grid_view");
+            return;
+        }
+    };
     let ffmpeg_path = state.ffmpeg_path.clone();
-    let mut tasks = state.stream_tasks.lock().unwrap();
-    let quality = config.quality.clone();
-
+    let mut tasks = match state.stream_tasks.lock() {
+        Ok(t) => t,
+        Err(_) => {
+            error!("stream_tasks mutex poisoned in grid_view");
+            return;
+        }
+    };
     for camera in &config.cameras {
         // Skip cameras that already have a running stream
         if tasks.contains_key(&camera.id) {
@@ -439,10 +353,9 @@ fn grid_view(state: State<AppState>, app: AppHandle) {
         let cam_url = camera.url.clone();
         let ffmpeg = ffmpeg_path.clone();
         let app_handle = app.clone();
-        let q = quality.clone();
 
         let handle = tauri::async_runtime::spawn(async move {
-            stream_camera(app_handle, ffmpeg, cam_id, cam_url, q).await;
+            stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
         });
 
         tasks.insert(camera.id.clone(), handle);
@@ -450,210 +363,23 @@ fn grid_view(state: State<AppState>, app: AppHandle) {
 }
 
 #[tauri::command]
-fn get_stream_health(state: State<AppState>) -> HashMap<String, StreamHealth> {
-    state.stream_health.lock().unwrap().clone()
-}
-
-#[tauri::command]
-fn save_preset(state: State<AppState>, name: String) -> Result<(), String> {
-    let mut config = state.config.lock().unwrap();
-    let preset = CameraPreset {
-        name: name.clone(),
-        cameras: config.cameras.clone(),
-    };
-    if let Some(idx) = config.presets.iter().position(|p| p.name == name) {
-        config.presets[idx] = preset;
-    } else {
-        config.presets.push(preset);
-    }
-    let json = serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())?;
-    std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn load_preset(state: State<AppState>, name: String) -> Result<Vec<Camera>, String> {
-    let config = state.config.lock().unwrap();
-    config.presets.iter().find(|p| p.name == name)
-        .map(|p| p.cameras.clone())
-        .ok_or("Preset not found".into())
-}
-
-#[tauri::command]
-fn delete_preset(state: State<AppState>, name: String) -> Result<(), String> {
-    let mut config = state.config.lock().unwrap();
-    config.presets.retain(|p| p.name != name);
-    let json = serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())?;
-    std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
-    Ok(())
+fn get_stream_health(state: State<AppState>) -> Result<HashMap<String, StreamHealth>, String> {
+    let health = state.stream_health.lock()
+        .map_err(|_| "stream_health mutex poisoned".to_string())?
+        .clone();
+    Ok(health)
 }
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
-// ── Encoder Selection and Command Building ──────────────────────────────────
-
-fn select_encoder(
-    config: &StreamConfig,
-    available: &AvailableEncoders,
-) -> (&'static str, Vec<String>) {
-    match config.codec {
-        CodecType::MJPEG => ("mjpeg", build_mjpeg_args(&config.quality)),
-        CodecType::H264 => {
-            let encoder = match config.encoder {
-                EncoderType::Auto => select_best_h264_encoder(available),
-                EncoderType::Nvenc => "h264_nvenc",
-                EncoderType::QSV => "h264_qsv",
-                EncoderType::Videotoolbox => "h264_videotoolbox",
-                EncoderType::X264 => "libx264",
-                EncoderType::MJPEG => return ("mjpeg", build_mjpeg_args(&config.quality)),
-            };
-
-            (encoder, build_h264_args(encoder, &config.quality))
-        }
-    }
-}
-
-fn select_best_h264_encoder(available: &AvailableEncoders) -> &'static str {
-    if available.nvenc {
-        "h264_nvenc"
-    } else if available.qsv {
-        "h264_qsv"
-    } else if available.videotoolbox {
-        "h264_videotoolbox"
-    } else {
-        "libx264"
-    }
-}
-
-fn build_h264_args(encoder: &str, quality: &Quality) -> Vec<String> {
-    let mut args = Vec::with_capacity(20);
-
-    // Encoder-specific args with quality control
-    match encoder {
-        "h264_nvenc" => {
-            args.extend([
-                "-c:v".to_string(),
-                "h264_nvenc".to_string(),
-                "-preset".to_string(),
-                "p4".to_string(),
-                "-tune".to_string(),
-                "ll".to_string(),
-                "-rc".to_string(),
-                "vbr".to_string(),
-            ]);
-
-            // NVENC quality control (use -cq instead of -crf)
-            let cq = match quality {
-                Quality::Low => "28",
-                Quality::Medium => "23",
-                Quality::High => "18",
-            };
-            args.extend([
-                "-cq".to_string(),
-                cq.to_string(),
-            ]);
-        }
-        "h264_qsv" => {
-            args.extend([
-                "-c:v".to_string(),
-                "h264_qsv".to_string(),
-                "-preset".to_string(),
-                "medium".to_string(),
-            ]);
-
-            // QSV quality control (dynamic global_quality)
-            let gq = match quality {
-                Quality::Low => "28",
-                Quality::Medium => "25",
-                Quality::High => "20",
-            };
-            args.extend([
-                "-global_quality".to_string(),
-                gq.to_string(),
-            ]);
-        }
-        "h264_videotoolbox" => {
-            args.extend([
-                "-c:v".to_string(),
-                "h264_videotoolbox".to_string(),
-                "-profile:v".to_string(),
-                "high".to_string(),
-            ]);
-
-            // Videotoolbox quality control (use bitrate)
-            let bitrate = match quality {
-                Quality::Low => "1M",
-                Quality::Medium => "2.5M",
-                Quality::High => "5M",
-            };
-            args.extend([
-                "-b:v".to_string(),
-                bitrate.to_string(),
-            ]);
-        }
-        "libx264" => {
-            args.extend([
-                "-c:v".to_string(),
-                "libx264".to_string(),
-                "-preset".to_string(),
-                "ultrafast".to_string(),
-                "-tune".to_string(),
-                "zerolatency".to_string(),
-            ]);
-
-            // x264 quality control (CRF)
-            let crf = match quality {
-                Quality::Low => "28",
-                Quality::Medium => "23",
-                Quality::High => "18",
-            };
-            args.extend([
-                "-crf".to_string(),
-                crf.to_string(),
-            ]);
-        }
-        _ => {}
-    }
-
-    // Scale based on quality (no FPS here - handled separately)
-    match quality {
-        Quality::Low => {
-            args.extend([
-                "-vf".to_string(),
-                "scale=-2:720".to_string(),
-            ]);
-        }
-        Quality::Medium => {
-            args.extend([
-                "-vf".to_string(),
-                "scale=-2:1080".to_string(),
-            ]);
-        }
-        Quality::High => {
-            // No scaling for high quality
-        }
-    }
-
-    // Output format
-    args.extend([
-        "-f".to_string(),
-        "h264".to_string(),
-        "-an".to_string(),
-    ]);
-
-    args
-}
-
 fn build_mjpeg_args(quality: &Quality) -> Vec<String> {
-    let (fps, q_val) = match quality {
-        Quality::Low => (5, 10),
-        Quality::Medium => (10, 5),
-        Quality::High => (15, 3),
+    let q_val = match quality {
+        Quality::Low => 10,
+        Quality::Medium => 5,
+        Quality::High => 3,
     };
 
     vec![
-        "-vf".to_string(),
-        format!("fps={}", fps),
         "-c:v".to_string(),
         "mjpeg".to_string(),
         "-q:v".to_string(),
@@ -672,6 +398,24 @@ fn build_fps_args(fps_mode: &FpsMode) -> Vec<String> {
         }
         FpsMode::Capped(fps) => {
             vec!["-r".to_string(), fps.to_string()]
+        }
+    }
+}
+
+/// Build FPS arguments for a camera, considering per-camera overrides and quality defaults
+fn build_fps_args_for_camera(
+    has_camera_override: bool,
+    fps_mode: &FpsMode,
+    quality: &Quality,
+) -> Vec<String> {
+    if has_camera_override {
+        build_fps_args(fps_mode)
+    } else {
+        // No per-camera override: apply quality-based default FPS cap
+        match quality {
+            Quality::Low => vec!["-r".to_string(), "10".to_string()],
+            Quality::Medium => vec!["-r".to_string(), "15".to_string()],
+            Quality::High => Vec::new(), // No FPS cap - output frames as received from camera
         }
     }
 }
@@ -696,7 +440,6 @@ async fn stream_camera(
     ffmpeg_path: PathBuf,
     camera_id: String,
     url: String,
-    quality: String,
 ) {
     info!("Starting stream for {} → {}", camera_id, url);
 
@@ -704,7 +447,13 @@ async fn stream_camera(
         // Get current attempt count
         let attempt = {
             let state = app.state::<AppState>();
-            let mut attempts = state.reconnect_attempts.lock().unwrap();
+            let mut attempts = match state.reconnect_attempts.lock() {
+                Ok(a) => a,
+                Err(poisoned) => {
+                    error!("reconnect_attempts mutex poisoned, recovering");
+                    poisoned.into_inner()
+                }
+            };
             let count = attempts.entry(camera_id.clone()).or_insert(0);
             *count += 1;
             *count
@@ -718,11 +467,13 @@ async fn stream_camera(
 
         // Attempt to stream
         let state = app.state::<AppState>();
-        match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url, &quality).await {
+        match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url).await {
             Ok(()) => {
                 info!("Stream ended normally for {}", camera_id);
                 // Reset attempt counter on success
-                state.reconnect_attempts.lock().unwrap().insert(camera_id.clone(), 0);
+                if let Ok(mut attempts) = state.reconnect_attempts.lock() {
+                    attempts.insert(camera_id.clone(), 0);
+                }
             }
             Err(e) => {
                 error!("Stream failed for {}: {}", camera_id, e);
@@ -749,19 +500,28 @@ async fn stream_camera(
 }
 
 /// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
-/// and pushes each frame to the frontend as a base64-encoded Tauri event.
+/// and broadcasts each frame to HTTP MJPEG stream clients.
 async fn try_stream_camera(
     app: &AppHandle,
     state: &tauri::State<'_, AppState>,
     ffmpeg_path: &PathBuf,
     camera_id: &str,
     url: &str,
-    _quality: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start_time = std::time::Instant::now();
-    let mut frame_count: u64 = 0;
-    let mut bytes_received: u64 = 0;
-    let mut last_health_update = std::time::Instant::now();
+
+    // Use atomic counters so they can be shared with the health update task
+    let frame_count = Arc::new(AtomicU64::new(0));
+    let bytes_received = Arc::new(AtomicU64::new(0));
+    let last_frame_buffer = Arc::new(Mutex::new(Vec::new()));
+
+    // Create broadcast channel for HTTP MJPEG streaming (Arc<Vec<u8>> avoids cloning frames)
+    {
+        let mut broadcasters = state.frame_broadcasters.lock().unwrap();
+        broadcasters.entry(camera_id.to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(30).0);
+        info!("Created frame broadcaster for camera: {}", camera_id);
+    }
 
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
@@ -777,26 +537,40 @@ async fn try_stream_camera(
             .trim_start_matches("udp://")
             .trim_start_matches('@');
         args.extend([
-            "-analyzeduration".into(), "10000000".into(),
-            "-probesize".into(),       "10000000".into(),
+            "-analyzeduration".into(), "500000".into(),
+            "-probesize".into(),       "512000".into(),
+            "-fflags".into(),          "+genpts+nobuffer".into(),
+            "-flags".into(),           "low_delay".into(),
             "-buffer_size".into(),     "2000000".into(),
             "-overrun_nonfatal".into(),"1".into(),
         ]);
         format!("udp://@{}", addr)
     } else if url.starts_with("rtsp://") {
         args.extend([
+            "-analyzeduration".into(),   "500000".into(),
+            "-probesize".into(),         "512000".into(),
+            "-fflags".into(),            "nobuffer".into(),
+            "-flags".into(),             "low_delay".into(),
             "-rtsp_transport".into(),    "tcp".into(),
             "-allowed_media_types".into(),"video".into(),
         ]);
         url.to_string()
     } else if url.starts_with("srt://") {
         args.extend([
-            "-analyzeduration".into(), "10000000".into(),
-            "-probesize".into(),       "10000000".into(),
+            "-analyzeduration".into(), "500000".into(),
+            "-probesize".into(),       "512000".into(),
+            "-fflags".into(),          "nobuffer".into(),
+            "-flags".into(),           "low_delay".into(),
         ]);
         url.to_string()
     } else {
-        // HTTP MJPEG, file, or other – pass through as-is
+        // HTTP MJPEG, file, or other
+        args.extend([
+            "-analyzeduration".into(), "500000".into(),
+            "-probesize".into(),       "512000".into(),
+            "-fflags".into(),          "nobuffer".into(),
+            "-flags".into(),           "low_delay".into(),
+        ]);
         url.to_string()
     };
 
@@ -805,7 +579,8 @@ async fn try_stream_camera(
 
     // Get camera from config
     let camera = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = state.config.lock()
+            .map_err(|_| "Config mutex poisoned")?;
         cfg.cameras.iter().find(|c| c.id == camera_id).cloned()
     };
 
@@ -816,14 +591,9 @@ async fn try_stream_camera(
 
     // Get stream config (global)
     let stream_config = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = state.config.lock()
+            .map_err(|_| "Config mutex poisoned")?;
         cfg.stream_config.clone()
-    };
-
-    // Get available encoders
-    let available = {
-        let enc = state.available_encoders.lock().expect("available_encoders mutex poisoned");
-        enc.clone()
     };
 
     // Determine effective quality and FPS mode
@@ -837,18 +607,33 @@ async fn try_stream_camera(
         .map(|c| &c.fps_mode)
         .unwrap_or(&FpsMode::Native);
 
-    // Create effective stream config with camera's quality override
-    let mut effective_config = stream_config.clone();
-    effective_config.quality = quality.clone();
+    // Detect if we should attempt MJPEG passthrough
+    let attempt_passthrough = url.contains("mjpeg") || url.contains("mjpg") || url.ends_with(".mjpeg") || url.ends_with(".mjpg");
 
-    // Select encoder and build args
-    let (encoder_name, mut codec_args) = select_encoder(&effective_config, &available);
+    let (encoder_name, mut codec_args, is_passthrough) = if attempt_passthrough {
+        // Attempt MJPEG passthrough - copy codec, no re-encoding
+        info!("Attempting MJPEG passthrough for camera {}", camera_id);
+        ("copy", vec![
+            "-c:v".to_string(), "copy".to_string(),
+            "-f".to_string(), "image2pipe".to_string(),
+            "-an".to_string(),
+        ], true)
+    } else {
+        // Standard MJPEG transcode path
+        ("mjpeg", build_mjpeg_args(quality), false)
+    };
 
-    // Add FPS args
-    codec_args.extend(build_fps_args(fps_mode));
+    // Add FPS args only if NOT passthrough (can't change FPS when copying)
+    if !is_passthrough {
+        codec_args.extend(build_fps_args_for_camera(
+            camera.codec_override.is_some(),
+            fps_mode,
+            quality,
+        ));
+    }
 
-    debug!("Using encoder: {} for camera {} (quality: {:?}, fps_mode: {:?})",
-           encoder_name, camera_id, quality, fps_mode);
+    debug!("Using encoder: {} for camera {} (quality: {:?}, fps_mode: {:?}, passthrough: {})",
+           encoder_name, camera_id, quality, fps_mode, is_passthrough);
 
     // Add codec-specific args
     for arg in codec_args {
@@ -863,7 +648,7 @@ async fn try_stream_camera(
     let mut cmd = Command::new(ffmpeg_path);
     cmd.args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
 
     // Hide the console window on Windows
@@ -876,44 +661,184 @@ async fn try_stream_camera(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            error!("Failed to spawn FFmpeg with encoder {}: {}", encoder_name, e);
+            error!("Failed to spawn FFmpeg for {}: {}", camera_id, e);
 
             // Emit error event to frontend
             let _ = app.emit("stream-error", StreamErrorEvent {
                 camera_id: camera_id.to_string(),
-                error: format!("Encoder {} failed", encoder_name),
-                encoder: encoder_name.to_string(),
+                error: format!("FFmpeg failed: {}", e),
             });
 
-            // Try fallback to x264
-            if encoder_name != "libx264" && encoder_name != "mjpeg" {
-                info!("Trying fallback to x264 for camera {}", camera_id);
-                // Recursively call with x264 fallback would go here
-                // For now, just return error
-            }
+            // If passthrough failed, fall back to MJPEG transcode
+            if is_passthrough {
+                info!("MJPEG passthrough failed for camera {}, falling back to transcode", camera_id);
+                let fallback_args = build_mjpeg_args(quality);
+                let input_end = args.iter().position(|a| a == "-c:v").unwrap_or(args.len());
+                let mut retry_args: Vec<String> = args[..input_end].to_vec();
+                for arg in &fallback_args {
+                    retry_args.push(arg.clone());
+                }
+                retry_args.extend(build_fps_args_for_camera(
+                    camera.codec_override.is_some(),
+                    fps_mode,
+                    quality,
+                ));
+                retry_args.push("pipe:1".to_string());
 
-            return Err(Box::new(e));
+                let mut retry_cmd = Command::new(ffmpeg_path);
+                retry_cmd.args(&retry_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
+
+                #[cfg(windows)]
+                {
+                    const CREATE_NO_WINDOW: u32 = 0x08000000;
+                    retry_cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+
+                match retry_cmd.spawn() {
+                    Ok(child) => child,
+                    Err(e2) => {
+                        error!("MJPEG fallback also failed for {}: {}", camera_id, e2);
+                        return Err(Box::new(e2));
+                    }
+                }
+            } else {
+                return Err(Box::new(e));
+            }
         }
     };
 
     // Initialize health entry
+    let quality_str = match quality {
+        Quality::Low => "Low",
+        Quality::Medium => "Medium",
+        Quality::High => "High",
+    }.to_string();
+
+    let codec_str = if is_passthrough {
+        "MJPEG (passthrough)".to_string()
+    } else {
+        "MJPEG".to_string()
+    };
+
     {
-        let mut health_map = state.stream_health.lock().unwrap();
-        health_map.insert(camera_id.to_string(), StreamHealth {
-            camera_id: camera_id.to_string(),
-            fps: 0.0,
-            bitrate_kbps: 0.0,
-            frame_count: 0,
-            last_frame_at: 0,
-            uptime_secs: 0,
-        });
+        if let Ok(mut health_map) = state.stream_health.lock() {
+            health_map.insert(camera_id.to_string(), StreamHealth {
+                camera_id: camera_id.to_string(),
+                fps: 0.0,
+                bitrate_kbps: 0.0,
+                frame_count: 0,
+                last_frame_at: 0,
+                uptime_secs: 0,
+                resolution: None,
+                quality_setting: quality_str.clone(),
+                codec: codec_str.clone(),
+            });
+        }
     }
 
+    // Spawn background task to update health stats every 2 seconds
+    let health_camera_id = camera_id.to_string();
+    let health_app = app.clone();
+    let health_frame_count = frame_count.clone();
+    let health_bytes_received = bytes_received.clone();
+    let health_frame_buffer = last_frame_buffer.clone();
+    let health_quality_str = quality_str.clone();
+    let health_codec_str = codec_str.clone();
+
+    let health_task = tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        interval.tick().await; // Skip first immediate tick
+
+        // Track previous tick values for rolling delta calculation
+        let mut prev_count: u64 = 0;
+        let mut prev_bytes: u64 = 0;
+        let mut prev_tick = std::time::Instant::now();
+
+        loop {
+            interval.tick().await;
+
+            let now = std::time::Instant::now();
+            let tick_elapsed = now.duration_since(prev_tick).as_secs_f32().max(0.1);
+
+            let count = health_frame_count.load(Ordering::Relaxed);
+            let bytes = health_bytes_received.load(Ordering::Relaxed);
+
+            // Rolling delta: frames and bytes since last tick
+            let delta_frames = count.saturating_sub(prev_count);
+            let delta_bytes = bytes.saturating_sub(prev_bytes);
+
+            let fps = delta_frames as f32 / tick_elapsed;
+            let bitrate_kbps = (delta_bytes as f32 * 8.0) / (tick_elapsed * 1000.0);
+
+            prev_count = count;
+            prev_bytes = bytes;
+            prev_tick = now;
+
+            let uptime = start_time.elapsed().as_secs().max(1);
+
+            // Get resolution from last frame
+            let resolution = match health_frame_buffer.lock() {
+                Ok(frame_buf) => {
+                    if !frame_buf.is_empty() {
+                        parse_jpeg_resolution(&frame_buf)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            };
+
+            let health = StreamHealth {
+                camera_id: health_camera_id.clone(),
+                fps,
+                bitrate_kbps,
+                frame_count: count,
+                last_frame_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                uptime_secs: uptime,
+                resolution,
+                quality_setting: health_quality_str.clone(),
+                codec: health_codec_str.clone(),
+            };
+
+            // Access state through app handle
+            let health_state = health_app.state::<AppState>();
+            if let Ok(mut health_map) = health_state.stream_health.lock() {
+                health_map.insert(health_camera_id.clone(), health.clone());
+            }
+
+            let _ = health_app.emit("stream-health", StreamHealthEvent {
+                camera_id: health_camera_id.clone(),
+                health,
+            });
+        }
+    });
+
     let mut stdout = child.stdout.take().unwrap();
+    // Capture stderr in a background task for diagnostics
+    let stderr_camera_id = camera_id.to_string();
+    let stderr_task = if let Some(stderr) = child.stderr.take() {
+        Some(tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                error!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
+            }
+        }))
+    } else {
+        None
+    };
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
     let mut frame = state.buffer_pool.acquire(); // Acquire from buffer pool
     let mut prev_byte: u8 = 0;
     let mut frame_count_local: u64 = 0;
+    let mut in_frame = false; // true after SOI seen, before frame emitted
 
     loop {
         let n = match stdout.read(&mut buf).await {
@@ -926,87 +851,105 @@ async fn try_stream_camera(
         };
 
         for &byte in &buf[..n] {
-            // Detect JPEG SOI marker (0xFF 0xD8) = start of a new frame.
-            // When we see a *second* SOI, everything before it is a complete frame.
-            if prev_byte == 0xFF && byte == 0xD8 && frame.len() > 2 {
-                // Pop the 0xFF that belongs to the new SOI
-                frame.pop();
+            frame.push(byte);
 
-                if frame.len() > 100 && frame[0] == 0xFF && frame[1] == 0xD8 {
-                    frame_count_local += 1;
-                    frame_count += 1;
-                    bytes_received += frame.len() as u64;
-
-                    if frame_count_local == 1 {
-                        info!(
-                            "First frame for {} ({} bytes)",
-                            camera_id,
-                            frame.len()
-                        );
-
-                        // Reset reconnect counter on first frame only (avoid mutex contention)
-                        let mut attempts = state.reconnect_attempts.lock().unwrap();
-                        attempts.insert(camera_id.to_string(), 0);
-
-                        let _ = app.emit(
-                            "camera-status",
-                            CameraStatusEvent {
-                                camera_id: camera_id.to_string(),
-                                status: "online".into(),
-                            },
-                        );
+            if prev_byte == 0xFF {
+                if byte == 0xD8 {
+                    // SOI marker — start of a new JPEG frame
+                    if in_frame && frame.len() > 2 {
+                        // We hit a new SOI while already in a frame (no EOI seen).
+                        // Discard the incomplete frame data before this SOI.
+                        frame.clear();
+                        frame.push(0xFF);
+                        frame.push(0xD8);
                     }
-                    let b64 = BASE64.encode(&frame);
-                    let _ = app.emit(
-                        "camera-frame",
-                        FrameEvent {
-                            camera_id: camera_id.to_string(),
-                            data: b64,
-                        },
-                    );
+                    in_frame = true;
+                } else if byte == 0xD9 && in_frame {
+                    // EOI marker — frame is complete, emit immediately
+                    if frame.len() > 100 && frame[0] == 0xFF && frame[1] == 0xD8 {
+                        frame_count_local += 1;
+                        frame_count.fetch_add(1, Ordering::Relaxed);
+                        bytes_received.fetch_add(frame.len() as u64, Ordering::Relaxed);
 
-                    // Update health stats every 2 seconds
-                    if last_health_update.elapsed().as_secs() >= 2 {
-                        let uptime = start_time.elapsed().as_secs();
-                        let fps = frame_count as f32 / uptime as f32;
-                        let bitrate_kbps = (bytes_received as f32 * 8.0) / (uptime as f32 * 1000.0);
+                        // Store latest frame for resolution detection (every 100 frames)
+                        if frame_count_local % 100 == 1 {
+                            if let Ok(mut frame_buf) = last_frame_buffer.lock() {
+                                frame_buf.clear();
+                                frame_buf.extend_from_slice(&frame);
+                            }
+                        }
 
-                        let health = StreamHealth {
-                            camera_id: camera_id.to_string(),
-                            fps,
-                            bitrate_kbps,
-                            frame_count,
-                            last_frame_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64,
-                            uptime_secs: uptime,
-                        };
+                        if frame_count_local == 1 {
+                            info!(
+                                "First frame for {} ({} bytes)",
+                                camera_id,
+                                frame.len()
+                            );
 
-                        state.stream_health.lock().unwrap().insert(camera_id.to_string(), health.clone());
+                            // Reset reconnect counter on first frame only (avoid mutex contention)
+                            if let Ok(mut attempts) = state.reconnect_attempts.lock() {
+                                attempts.insert(camera_id.to_string(), 0);
+                            }
 
-                        let _ = app.emit("stream-health", StreamHealthEvent {
-                            camera_id: camera_id.to_string(),
-                            health,
-                        });
+                            let _ = app.emit(
+                                "camera-status",
+                                CameraStatusEvent {
+                                    camera_id: camera_id.to_string(),
+                                    status: "online".into(),
+                                },
+                            );
+                        }
 
-                        last_health_update = std::time::Instant::now();
+                        // Broadcast frame to HTTP stream clients (Arc avoids ~200KB clone per send)
+                        if let Ok(broadcasters) = state.frame_broadcasters.lock() {
+                            if let Some(sender) = broadcasters.get(camera_id) {
+                                if sender.receiver_count() > 0 {
+                                    let frame_arc = Arc::new(frame.clone());
+                                    match sender.send(frame_arc) {
+                                        Ok(receivers) => {
+                                            if frame_count.load(Ordering::Relaxed) % 100 == 0 {
+                                                debug!("Broadcast frame to {} HTTP clients for {}", receivers, camera_id);
+                                            }
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                        }
                     }
+
+                    // Release buffer back to pool and acquire fresh buffer for next frame
+                    let old_frame = std::mem::replace(&mut frame, state.buffer_pool.acquire());
+                    state.buffer_pool.release(old_frame);
+                    in_frame = false;
                 }
-
-                // Release buffer back to pool and acquire fresh buffer for next frame
-                let old_frame = std::mem::replace(&mut frame, state.buffer_pool.acquire());
-                state.buffer_pool.release(old_frame);
-                frame.push(0xFF);
-                frame.push(0xD8);
-            } else {
-                frame.push(byte);
             }
+
+            // Cap frame size to prevent unbounded memory growth
+            if frame.len() >= 10 * 1024 * 1024 {
+                error!("Frame exceeds 10MB, resetting buffer for {}", camera_id);
+                frame.clear();
+                in_frame = false;
+                prev_byte = 0;
+                continue;
+            }
+
             prev_byte = byte;
         }
     }
 
-    // Return buffer to pool before stream ends
+    // Stop background tasks FIRST to prevent race conditions
+    health_task.abort();
+    if let Some(task) = stderr_task {
+        task.abort();
+    }
+
+    // Remove health entry to prevent stale "online" status
+    if let Ok(mut health_map) = state.stream_health.lock() {
+        health_map.remove(camera_id);
+    }
+
+    // Return buffer to pool last
     state.buffer_pool.release(frame);
 
     info!(
@@ -1043,16 +986,89 @@ async fn run_api_server(app: AppHandle, port: u16) {
         let app_handle = app.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                _ => return,
+            let n = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read(&mut buf),
+            ).await {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => return, // timeout, error, or zero bytes — drop connection
             };
 
             let request = String::from_utf8_lossy(&buf[..n]);
             let first_line = request.lines().next().unwrap_or("");
+            let method = first_line.split_whitespace().next().unwrap_or("");
             let path = first_line.split_whitespace().nth(1).unwrap_or("/");
 
-            debug!("API request from {}: {}", peer, path);
+            debug!("API request from {}: {} {}", peer, method, path);
+
+            // Debug: Log all requests
+            info!("HTTP Request: {} {}", method, path);
+
+            // Handle CORS preflight
+            if method == "OPTIONS" {
+                let response = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type\r\n\
+                    Access-Control-Max-Age: 86400\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                return;
+            }
+
+            // Handle MJPEG streaming endpoint
+            if path.starts_with("/camera/") && path.ends_with("/stream") {
+                // Extract camera ID from path like "/camera/cam1/stream"
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() >= 3 {
+                    let camera_id = parts[2].to_string();
+                    info!("=== MJPEG stream requested for camera: {} ===", camera_id);
+
+                    // Debug: Show available broadcasters
+                    if let Ok(broadcasters) = app_handle.state::<AppState>().frame_broadcasters.lock() {
+                        let available: Vec<_> = broadcasters.keys().cloned().collect();
+                        info!("Available camera broadcasters: {:?}", available);
+                    }
+
+                    // Get or create broadcast sender for this camera
+                    let state_ref = app_handle.state::<AppState>();
+                    let mut rx = {
+                        let mut broadcasters = state_ref.frame_broadcasters.lock().unwrap();
+                        let sender = broadcasters.entry(camera_id.clone())
+                            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(30).0);
+                        sender.subscribe()
+                    };
+
+                    // Send MJPEG HTTP headers
+                    let headers = "HTTP/1.1 200 OK\r\n\
+                        Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\
+                        Access-Control-Allow-Origin: *\r\n\
+                        Cache-Control: no-cache, no-store, must-revalidate\r\n\
+                        Pragma: no-cache\r\n\
+                        Connection: close\r\n\r\n";
+
+                    if stream.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    // Stream frames as they arrive — batched into a single write_all
+                    while let Ok(jpeg_data) = rx.recv().await {
+                        use std::io::Write as IoWrite;
+                        let mut buf = Vec::with_capacity(jpeg_data.len() + 128);
+                        let _ = write!(buf, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg_data.len());
+                        buf.extend_from_slice(&jpeg_data);
+                        buf.extend_from_slice(b"\r\n");
+
+                        if stream.write_all(&buf).await.is_err() {
+                            break;
+                        }
+                    }
+
+                    info!("HTTP stream client disconnected for {}", camera_id);
+                    return;
+                }
+            }
 
             let (status, body) = if path == "/api/grid" {
                 let _ = app_handle.emit("remote-command", RemoteCommandEvent {
@@ -1075,11 +1091,17 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     ("400 Bad Request", r#"{"ok":false,"error":"invalid index"}"#.to_string())
                 }
             } else if path == "/api/status" {
-                let config = app_handle.state::<AppState>().config.lock().unwrap().clone();
-                let cameras_json: Vec<String> = config.cameras.iter().enumerate().map(|(i, c)| {
-                    format!(r#"{{"index":{},"id":"{}","name":"{}"}}"#, i + 1, c.id, c.name)
-                }).collect();
-                ("200 OK", format!(r#"{{"ok":true,"cameras":[{}]}}"#, cameras_json.join(",")))
+                match app_handle.state::<AppState>().config.lock() {
+                    Ok(config) => {
+                        let cameras_json: Vec<serde_json::Value> = config.cameras.iter().enumerate().map(|(i, c)| {
+                            serde_json::json!({"index": i + 1, "id": c.id, "name": c.name})
+                        }).collect();
+                        ("200 OK", serde_json::json!({"ok": true, "cameras": cameras_json}).to_string())
+                    }
+                    Err(_) => {
+                        ("500 Internal Server Error", r#"{"ok":false,"error":"Config mutex poisoned"}"#.to_string())
+                    }
+                }
             } else if path == "/api/fullscreen" {
                 match api_fullscreen(app_handle.clone()).await {
                     Ok(result) => ("200 OK", result.to_string()),
@@ -1128,104 +1150,45 @@ fn load_config() -> (AppConfig, String) {
     (config, path_str)
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+// ── JPEG Resolution Parser ──────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_corner_serialization() {
-        let corner = Corner::TL;
-        let json = serde_json::to_string(&corner).unwrap();
-        assert_eq!(json, r#""TL""#);
-
-        let corner = Corner::BR;
-        let json = serde_json::to_string(&corner).unwrap();
-        assert_eq!(json, r#""BR""#);
+/// Extract resolution from JPEG data by parsing SOF (Start of Frame) marker
+fn parse_jpeg_resolution(data: &[u8]) -> Option<String> {
+    if data.len() < 10 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None; // Not a valid JPEG (missing SOI)
     }
 
-    #[test]
-    fn test_corner_deserialization() {
-        let corner: Corner = serde_json::from_str(r#""TL""#).unwrap();
-        assert!(matches!(corner, Corner::TL));
+    let mut i = 2;
+    while i + 9 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
 
-        let corner: Corner = serde_json::from_str(r#""BR""#).unwrap();
-        assert!(matches!(corner, Corner::BR));
+        let marker = data[i + 1];
+
+        // SOF markers (Start of Frame): 0xC0-0xCF (except 0xC4, 0xC8, 0xCC which are not SOF)
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+            // SOF structure: FF Cn [length:2] [precision:1] [height:2] [width:2] ...
+            let height = u16::from_be_bytes([data[i + 5], data[i + 6]]);
+            let width = u16::from_be_bytes([data[i + 7], data[i + 8]]);
+            return Some(format!("{}x{}", width, height));
+        }
+
+        // Skip to next marker
+        if i + 3 < data.len() {
+            let length = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            i += 2 + length;
+        } else {
+            break;
+        }
     }
 
-    #[test]
-    fn test_corner_deserialization_invalid() {
-        let result: Result<Corner, _> = serde_json::from_str(r#""INVALID""#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_pip_overlay_valid_size() {
-        let json = r#"{
-            "camera_id": "cam1",
-            "corner": "TL",
-            "size_percent": 25
-        }"#;
-        let overlay: PipOverlay = serde_json::from_str(json).unwrap();
-        assert_eq!(overlay.camera_id, "cam1");
-        assert!(matches!(overlay.corner, Corner::TL));
-        assert_eq!(overlay.size_percent, 25);
-    }
-
-    #[test]
-    fn test_pip_overlay_size_too_small() {
-        let json = r#"{
-            "camera_id": "cam1",
-            "corner": "TL",
-            "size_percent": 5
-        }"#;
-        let result: Result<PipOverlay, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 10 and 40"));
-    }
-
-    #[test]
-    fn test_pip_overlay_size_too_large() {
-        let json = r#"{
-            "camera_id": "cam1",
-            "corner": "TL",
-            "size_percent": 50
-        }"#;
-        let result: Result<PipOverlay, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 10 and 40"));
-    }
-
-    #[test]
-    fn test_pip_config_serialization() {
-        let config = PipConfig {
-            main_camera_id: "main".to_string(),
-            overlays: vec![
-                PipOverlay {
-                    camera_id: "cam1".to_string(),
-                    corner: Corner::TL,
-                    size_percent: 20,
-                },
-                PipOverlay {
-                    camera_id: "cam2".to_string(),
-                    corner: Corner::BR,
-                    size_percent: 30,
-                },
-            ],
-        };
-
-        let json = serde_json::to_string_pretty(&config).unwrap();
-        let parsed: PipConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.main_camera_id, "main");
-        assert_eq!(parsed.overlays.len(), 2);
-        assert_eq!(parsed.overlays[0].camera_id, "cam1");
-        assert_eq!(parsed.overlays[1].size_percent, 30);
-    }
+    None
 }
 
-// ── Hardware Encoder Detection ───────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 
 /// Returns the path to the FFmpeg binary (bundled or system).
 fn get_ffmpeg_path() -> PathBuf {
@@ -1236,9 +1199,21 @@ fn get_ffmpeg_path() -> PathBuf {
         .to_path_buf();
 
     // Dev: in src-tauri/binaries/ (next to Cargo.toml)
+    // Build platform-specific sidecar name dynamically
+    let dev_binary_name = if cfg!(windows) {
+        "ffmpeg-x86_64-pc-windows-msvc.exe".to_string()
+    } else {
+        let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
+        let os_target = if cfg!(target_os = "macos") {
+            "apple-darwin"
+        } else {
+            "unknown-linux-gnu"
+        };
+        format!("ffmpeg-{}-{}", arch, os_target)
+    };
     let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
-        .join(if cfg!(windows) { "ffmpeg-x86_64-pc-windows-msvc.exe" } else { "ffmpeg-aarch64-unknown-linux-gnu" });
+        .join(dev_binary_name);
 
     // Production: Tauri places sidecar binaries directly next to the exe
     let prod_sidecar = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
@@ -1251,109 +1226,6 @@ fn get_ffmpeg_path() -> PathBuf {
         // Fallback: try PATH
         PathBuf::from("ffmpeg")
     }
-}
-
-async fn detect_encoders() -> AvailableEncoders {
-    use tokio::process::Command;
-
-    let ffmpeg_path = get_ffmpeg_path();
-
-    let output = match Command::new(&ffmpeg_path)
-        .args(["-encoders"])
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            error!("FFmpeg -encoders failed: {}",
-                   String::from_utf8_lossy(&output.stderr));
-            return AvailableEncoders::default();
-        }
-        Err(e) => {
-            error!("Failed to execute FFmpeg: {}", e);
-            return AvailableEncoders::default();
-        }
-    };
-
-    let encoders_str = String::from_utf8_lossy(&output.stdout);
-
-    // Check if encoders are listed
-    let has_nvenc = encoders_str.contains("h264_nvenc");
-    let has_qsv = encoders_str.contains("h264_qsv");
-    let has_videotoolbox = encoders_str.contains("h264_videotoolbox");
-
-    info!("FFmpeg lists encoders - nvenc: {}, qsv: {}, videotoolbox: {}",
-          has_nvenc, has_qsv, has_videotoolbox);
-
-    // Test encoders that are listed
-    let ffmpeg_path_str = ffmpeg_path.to_string_lossy().to_string();
-
-    let nvenc_works = if has_nvenc {
-        test_encoder(&ffmpeg_path_str, "h264_nvenc").await
-    } else {
-        false
-    };
-
-    let qsv_works = if has_qsv {
-        test_encoder(&ffmpeg_path_str, "h264_qsv").await
-    } else {
-        false
-    };
-
-    let videotoolbox_works = if has_videotoolbox {
-        test_encoder(&ffmpeg_path_str, "h264_videotoolbox").await
-    } else {
-        false
-    };
-
-    info!("Encoder tests complete - nvenc: {}, qsv: {}, videotoolbox: {}",
-          nvenc_works, qsv_works, videotoolbox_works);
-
-    AvailableEncoders {
-        nvenc: nvenc_works,
-        qsv: qsv_works,
-        videotoolbox: videotoolbox_works,
-        x264: true,
-    }
-}
-
-async fn test_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
-    use tokio::process::Command;
-
-    // Quick test: encode 1 second of test video
-    let output = Command::new(ffmpeg_path)
-        .args([
-            "-f", "lavfi",
-            "-i", "testsrc=duration=1:size=320x240:rate=1",
-            "-c:v", encoder,
-            "-f", "null",
-            "-"
-        ])
-        .output()
-        .await;
-
-    match output {
-        Ok(result) => result.status.success(),
-        Err(_) => false,
-    }
-}
-
-#[tauri::command]
-async fn get_available_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
-    let encoders = state.available_encoders.lock()
-        .expect("available_encoders mutex poisoned");
-    Ok(encoders.clone())
-}
-
-#[tauri::command]
-async fn refresh_encoders(state: State<'_, AppState>) -> Result<AvailableEncoders, String> {
-    let encoders = detect_encoders().await;
-    {
-        let mut stored = state.available_encoders.lock()
-            .expect("available_encoders mutex poisoned");
-        *stored = encoders.clone();
-    }
-    Ok(encoders)
 }
 
 #[tauri::command]
@@ -1378,10 +1250,34 @@ async fn api_fullscreen(app: AppHandle) -> Result<serde_json::Value, String> {
 async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     info!("API reload requested");
 
+    // Stop existing streams
+    {
+        let mut tasks = state.stream_tasks.lock().map_err(|_| "stream_tasks mutex poisoned")?;
+        let camera_ids: Vec<String> = tasks.keys().cloned().collect();
+        for (_, handle) in tasks.drain() {
+            handle.abort();
+        }
+        let mut health = state.stream_health.lock().map_err(|_| "stream_health mutex poisoned")?;
+        health.clear();
+        let mut attempts = state.reconnect_attempts.lock().map_err(|_| "reconnect_attempts mutex poisoned")?;
+        attempts.clear();
+        drop(health);
+        drop(attempts);
+        drop(tasks);
+        for id in camera_ids {
+            let _ = app.emit("camera-status", CameraStatusEvent {
+                camera_id: id,
+                status: "offline".to_string(),
+            });
+        }
+    }
+
     // Reload config from disk
     let (config, _) = load_config();
 
     // Update in-memory config
+    let cameras = config.cameras.clone();
+    let ffmpeg_path = state.ffmpeg_path.clone();
     {
         let mut cfg = state.config.lock()
             .map_err(|_| "Config mutex poisoned")?;
@@ -1389,6 +1285,23 @@ async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_
     }
 
     info!("Config reloaded from disk");
+
+    // Start streams for new config
+    {
+        let mut tasks = state.stream_tasks.lock().map_err(|_| "stream_tasks mutex poisoned")?;
+        for camera in &cameras {
+            let cam_id = camera.id.clone();
+            let cam_url = camera.url.clone();
+            let ffmpeg = ffmpeg_path.clone();
+            let app_handle = app.clone();
+
+            let handle = tauri::async_runtime::spawn(async move {
+                stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
+            });
+
+            tasks.insert(camera.id.clone(), handle);
+        }
+    }
 
     // Emit reload event to frontend
     let _ = app.emit("reload-config", serde_json::json!({"ok": true}));
@@ -1400,6 +1313,38 @@ async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_
 }
 
 // ── App Entry ────────────────────────────────────────────────────────────────
+
+/// Deletes log files older than `max_age_days` from the given directory.
+fn cleanup_old_logs(log_dir: &std::path::Path, max_age_days: u64) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
+
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Only clean up files matching the log pattern (stageview.log.*)
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if !name.starts_with("stageview.log") {
+                continue;
+            }
+        }
+        if let Ok(metadata) = entry.metadata() {
+            if let Ok(modified) = metadata.modified() {
+                if modified < cutoff {
+                    eprintln!("Removing old log file: {}", path.display());
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
 
 /// Setup logging with daily rotation. The guard must be kept alive for the lifetime
 /// of the application, otherwise logging will stop when it's dropped.
@@ -1415,7 +1360,10 @@ fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
                   log_dir.display(), e);
     }
 
-    // Daily rotation (files kept indefinitely - manual cleanup recommended for 24/7 use)
+    // Clean up log files older than 30 days
+    cleanup_old_logs(&log_dir, 30);
+
+    // Daily rotation
     let file_appender = tracing_appender::rolling::daily(log_dir.clone(), "stageview.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -1443,13 +1391,6 @@ pub fn run() {
     let ffmpeg_path = get_ffmpeg_path();
     info!("Using ffmpeg at: {}", ffmpeg_path.display());
 
-    // Detect available encoders at startup
-    let available_encoders = tauri::async_runtime::block_on(detect_encoders());
-
-    info!("Available encoders: nvenc={}, qsv={}, videotoolbox={}, x264={}",
-          available_encoders.nvenc, available_encoders.qsv,
-          available_encoders.videotoolbox, available_encoders.x264);
-
     tauri::Builder::default()
         .setup(move |app| {
             let api_port = config.api_port;
@@ -1465,23 +1406,35 @@ pub fn run() {
                 // Pool of 32 buffers: allows 2 buffers per camera for up to 16 simultaneous streams
                 // (one being filled, one being encoded) with room for temporary spikes
                 buffer_pool: BufferPool::new(32),
-                available_encoders: Mutex::new(available_encoders),
+                frame_broadcasters: Arc::new(Mutex::new(HashMap::new())),
             });
 
-            // Restore window position and size
+            // Restore window position and size with off-screen validation
             if let Some(window) = app.get_webview_window("main") {
                 use tauri::Position;
                 use tauri::Size;
 
-                let _ = window.set_position(Position::Physical(tauri::PhysicalPosition {
-                    x: window_state.x,
-                    y: window_state.y,
-                }));
+                // Validate position isn't off-screen (e.g. external monitor disconnected)
+                let default_ws = WindowState::default();
+                let (x, y) = if window_state.x < -500 || window_state.x > 10000
+                    || window_state.y < -500 || window_state.y > 10000 {
+                    info!("Saved window position ({}, {}) appears off-screen, resetting to default",
+                          window_state.x, window_state.y);
+                    (default_ws.x, default_ws.y)
+                } else {
+                    (window_state.x, window_state.y)
+                };
 
-                let _ = window.set_size(Size::Physical(tauri::PhysicalSize {
-                    width: window_state.width,
-                    height: window_state.height,
-                }));
+                // Validate size is reasonable
+                let (width, height) = if window_state.width < 200 || window_state.height < 150
+                    || window_state.width > 10000 || window_state.height > 10000 {
+                    (default_ws.width, default_ws.height)
+                } else {
+                    (window_state.width, window_state.height)
+                };
+
+                let _ = window.set_position(Position::Physical(tauri::PhysicalPosition { x, y }));
+                let _ = window.set_size(Size::Physical(tauri::PhysicalSize { width, height }));
 
                 if window_state.maximized {
                     let _ = window.maximize();
@@ -1504,11 +1457,6 @@ pub fn run() {
             solo_camera,
             grid_view,
             get_stream_health,
-            save_preset,
-            load_preset,
-            delete_preset,
-            get_available_encoders,
-            refresh_encoders,
             api_fullscreen,
             api_reload,
         ])

@@ -76,19 +76,13 @@ button {
   transform: scale(1.05);
 }
 
-#grid[data-layout="pip"] .camera-tile {
-  border: 2px solid #444;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-}
-
-.camera-tile img {
+.camera-tile canvas {
   width: 100%;
   height: 100%;
-  object-fit: cover;
   display: none;
 }
 
-.camera-tile img.has-frame {
+.camera-tile canvas.has-frame {
   display: block;
 }
 
@@ -216,14 +210,15 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 300ms ease;
   z-index: 100;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 
-body:hover #toolbar,
-#toolbar:hover {
+#toolbar.visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .toolbar-icon {
@@ -573,8 +568,8 @@ body:hover #toolbar,
 #settings {
   position: fixed;
   top: 0;
-  right: -420px;
-  width: 400px;
+  right: -570px;
+  width: 550px;
   height: 100%;
   background: var(--surface);
   border-left: 1px solid var(--border);
@@ -622,11 +617,12 @@ body:hover #toolbar,
 .settings-body {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  overflow-x: hidden;
+  padding: 28px;
 }
 
 .settings-body section {
-  margin-bottom: 32px;
+  margin-bottom: 40px;
 }
 
 .settings-body h3 {
@@ -635,7 +631,7 @@ body:hover #toolbar,
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 /* Camera entry fields */
@@ -643,12 +639,12 @@ body:hover #toolbar,
 .camera-entry {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: 10px;
+  padding: 14px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   position: relative;
 }
 
@@ -699,18 +695,12 @@ body:hover #toolbar,
 }
 
 .api-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 6px;
-  background: #3b82f6;
-  color: white;
-  font-size: 0.75rem;
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.8rem;
   font-weight: 600;
-  border-radius: 4px;
-  margin-right: 8px;
+  margin-bottom: 4px;
+  opacity: 0.5;
   cursor: help;
 }
 
@@ -736,12 +726,12 @@ body:hover #toolbar,
 .interval-input {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .interval-input input {
-  width: 80px;
+  width: 64px;
   padding: 8px 12px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -826,16 +816,14 @@ label {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 0;
+  padding: 10px 0;
   font-size: 14px;
   color: var(--text);
   cursor: pointer;
 }
 
 .toggle-row + .toggle-row {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-  margin-top: 4px;
+  margin-top: 16px;
 }
 
 .toggle-row input[type="checkbox"] {
@@ -905,7 +893,7 @@ select option {
   grid-row: 1 / -1;
 }
 
-.camera-tile.solo img {
+.camera-tile.solo canvas {
   object-fit: contain;
 }
 
@@ -937,9 +925,8 @@ select option {
 .settings-section h3 {
   margin: 0 0 1rem 0;
   font-size: 1.1rem;
-  color: #fff;
-  border-bottom: 1px solid #444;
-  padding-bottom: 0.5rem;
+  font-weight: 600;
+  color: var(--text);
 }
 
 #health-stats-container {
@@ -949,51 +936,47 @@ select option {
   --health-uptime-color: #10b981;
 
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: 1fr;
   gap: 0.75rem;
   margin-bottom: 1.5rem;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
-@media (max-width: 640px) {
-  #health-stats-container {
-    grid-template-columns: 1fr;
-  }
-}
-
 .health-card {
-  background: linear-gradient(135deg, #2a2a2a 0%, #1f1f1f 100%);
-  border: 1px solid #444;
-  border-radius: 6px;
-  padding: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
   display: flex;
   flex-direction: column;
+  gap: 0.75rem;
 }
 
 /* Health state indicators on health cards */
 .health-card[data-health-state="online"] {
-  border-left: 3px solid #10b981;
+  border-left-color: #10b981;
 }
 
 .health-card[data-health-state="warn"] {
-  border-left: 3px solid #f59e0b;
+  border-left-color: #f59e0b;
 }
 
 .health-card[data-health-state="error"] {
-  border-left: 3px solid #ef4444;
+  border-left-color: #ef4444;
 }
 
 .health-camera-name {
-  font-weight: 500;
-  margin-bottom: 0.5rem;
-  color: #4da6ff;
-  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.95rem;
 }
 
 .health-metrics {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.4rem;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+  font-size: 0.85rem;
 }
 
 .health-metric {
@@ -1029,81 +1012,19 @@ select option {
   color: var(--health-uptime-color);
 }
 
-/* ── Layout Editor ────────────────────────────────────────────────────────── */
-
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 950;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.health-metric:nth-child(4) .health-value {
+  color: #fbbf24; /* Yellow for resolution */
 }
 
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 24px;
-  width: 600px;
-  max-width: 90vw;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+.health-metric:nth-child(5) .health-value {
+  color: #8b5cf6; /* Purple for quality */
 }
 
-.panel h2 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
+.health-metric:nth-child(6) .health-value {
+  color: #ec4899; /* Pink for codec */
 }
 
-.layout-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.layout-controls label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 14px;
-}
-
-.layout-controls input,
-.layout-controls select {
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 14px;
-  font-family: inherit;
-  outline: none;
-}
-
-.layout-controls input:focus,
-.layout-controls select:focus {
-  border-color: var(--accent);
-}
-
-.layout-camera-list {
-  max-height: 400px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.panel-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 8px;
-}
+/* ── Shared Button Styles ─────────────────────────────────────────────────── */
 
 .btn-primary {
   padding: 10px 20px;
@@ -1121,246 +1042,13 @@ select option {
   background: var(--accent-hover);
 }
 
-.btn-secondary {
-  padding: 10px 20px;
-  background: transparent;
-  color: var(--text-dim);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.btn-secondary:hover {
-  background: var(--surface-hover);
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-
-/* ── PIP Editor ───────────────────────────────────────────────────────────── */
-
-.pip-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.pip-section-header {
-  margin-top: 20px;
-  margin-bottom: 12px;
-}
-
-.pip-add-button {
-  width: 100%;
-  margin-top: 12px;
-}
-
-.pip-main-camera {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.pip-main-camera label {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.pip-main-camera select {
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 14px;
-  font-family: inherit;
-  outline: none;
-}
-
-.pip-main-camera select:focus {
-  border-color: var(--accent);
-}
-
-#pip-overlays-container {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.pip-overlay-item {
-  background: #2a2a2a;
-  border: 1px solid #444;
-  border-radius: 6px;
-  padding: 12px;
-}
-
-.pip-overlay-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.pip-overlay-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.pip-overlay-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.pip-overlay-controls label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.pip-overlay-camera,
-.pip-overlay-size {
-  padding: 6px 10px;
-  background: #1a1a1a;
-  border: 1px solid #555;
-  border-radius: 4px;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-}
-
-.pip-overlay-camera:focus,
-.pip-overlay-size:focus {
-  border-color: var(--accent);
-}
-
-.corner-selector {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.corner-selector button {
-  padding: 10px;
-  background: #1a1a1a;
-  border: 1px solid #555;
-  border-radius: 4px;
-  color: var(--text-dim);
-  font-size: 20px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.corner-selector button:hover {
-  background: #2a2a2a;
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.corner-selector button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: white;
-}
-
-.pip-overlay-remove {
-  padding: 4px 10px;
-  font-size: 12px;
-}
-
-/* ── Camera Presets ───────────────────────────────────────────────────────── */
-
-.preset-controls {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.preset-controls input {
-  flex: 1;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-}
-
-.preset-controls input:focus {
-  border-color: var(--accent);
-}
-
-.preset-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.preset-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.75rem;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  border-radius: 4px;
-}
-
-.preset-name {
-  font-weight: 600;
-  color: #4da6ff;
-}
-
-.preset-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.btn-small {
-  padding: 0.3rem 0.6rem;
-  font-size: 0.8rem;
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background var(--transition);
-}
-
-.btn-small:hover {
-  background: var(--accent-hover);
-}
-
-.btn-danger {
-  background: #d9534f;
-}
-
-.btn-danger:hover {
-  background: #c9302c;
-}
-
 /* ── Toast Notifications ──────────────────────────────────────────────────── */
 
 .toast {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
   padding: 12px 20px;
   border-radius: 6px;
   color: white;
-  font-size: 0.9rem;
   font-size: 14px;
-  z-index: 9999;
   animation: slideIn 0.3s ease-out;
   transition: opacity 0.3s ease-out;
   max-width: 400px;
@@ -1383,198 +1071,44 @@ select option {
   }
 }
 
-/* ── Codec Settings ───────────────────────────────────────────────────────── */
+/* ── Inline Camera Overrides ──────────────────────────────────────────────── */
 
-.setting-section {
-  margin-bottom: 2rem;
-  padding-bottom: 1.5rem;
-  border-bottom: 1px solid #333;
+.cam-overrides {
+  display: flex;
+  gap: 6px;
 }
 
-.setting-section h3 {
-  font-size: 1rem;
-  font-weight: 600;
-  margin-bottom: 1rem;
-  color: #e5e7eb;
-}
-
-.setting-row {
-  margin-bottom: 1rem;
-}
-
-.setting-row label {
-  display: block;
-  margin-bottom: 0.5rem;
-  font-size: 0.875rem;
-  color: #d1d5db;
-}
-
-.setting-row select {
-  width: 100%;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-  cursor: pointer;
-  transition: border-color var(--transition);
+.cam-quality,
+.cam-fps {
+  width: 72px;
+  padding: 4px 6px;
   margin-top: 0;
-}
-
-.setting-row select:focus {
-  border-color: var(--accent);
-}
-
-.encoder-status {
-  margin-top: 0.75rem;
-  font-size: 0.85rem;
-}
-
-.btn-refresh {
-  background: #374151;
-  color: #e5e7eb;
-  padding: 6px 12px;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  margin-right: 8px;
-  border: none;
-  cursor: pointer;
-  transition: background var(--transition);
-}
-
-.btn-refresh:hover {
-  background: #4b5563;
-}
-
-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* ── Camera Configuration Modal ────────────────────────────────────────── */
-
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.75);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10000;
-}
-
-.modal-content {
-  background: #1a1a1a;
-  border-radius: var(--radius);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-  width: 90%;
-  max-width: 500px;
-  max-height: 90vh;
-  overflow: auto;
-}
-
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20px;
-  border-bottom: 1px solid var(--border);
-}
-
-.modal-header h3 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.modal-close {
-  background: transparent;
-  color: var(--text-dim);
-  border: none;
-  font-size: 20px;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.modal-close:hover {
-  background: var(--surface-hover);
-  color: var(--text);
-}
-
-.modal-body {
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.modal-body label {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.modal-body select,
-.modal-body input[type="number"] {
-  padding: 8px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 11px;
   font-family: inherit;
   outline: none;
+  cursor: pointer;
   transition: border-color var(--transition);
 }
 
-.modal-body select:focus,
-.modal-body input[type="number"]:focus {
+.cam-quality:focus,
+.cam-fps:focus {
   border-color: var(--accent);
 }
 
-.modal-footer {
+.cam-override-field {
   display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  padding: 20px;
-  border-top: 1px solid var(--border);
+  flex-direction: column;
+  gap: 2px;
 }
 
-.btn-config {
-  position: absolute;
-  top: 8px;
-  right: 36px;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
+.cam-override-label {
+  font-size: 10px;
   color: var(--text-dim);
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.btn-config:hover {
-  background: var(--surface-hover);
-  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
 }
