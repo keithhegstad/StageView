@@ -912,11 +912,13 @@ class StageView {
       if (sameSet) {
         // Camera list unchanged — just refresh the values in place
         this.previousHealthValues.clear();
+        this._healthStateCounters.clear();
         this._scheduleHealthUpdate();
         return;
       }
       // Camera list changed — tear down and rebuild; clear stale cache
       this.previousHealthValues.clear();
+      this._healthStateCounters.clear();
       existingHealth.closest(".settings-section")?.remove();
     }
 
@@ -1001,6 +1003,11 @@ class StageView {
     for (const cameraId of this.previousHealthValues.keys()) {
       if (!currentCameraIds.has(cameraId)) {
         this.previousHealthValues.delete(cameraId);
+      }
+    }
+    for (const cameraId of this._healthStateCounters.keys()) {
+      if (!currentCameraIds.has(cameraId)) {
+        this._healthStateCounters.delete(cameraId);
       }
     }
 
@@ -1107,7 +1114,8 @@ class StageView {
       this._healthStateCounters.set(cameraId, counter);
 
       const prevState = card.getAttribute('data-health-state');
-      if (counter.count >= 3 && prevState !== desiredState) {
+      const threshold = prevState === 'unknown' ? 1 : 3;
+      if (counter.count >= threshold && prevState !== desiredState) {
         card.setAttribute('data-health-state', desiredState);
       }
     });
