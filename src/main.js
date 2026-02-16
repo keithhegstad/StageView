@@ -362,6 +362,10 @@ class StageView {
     grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
     grid.style.position = "";
 
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
     grid.innerHTML = this.displayOrder
       .map((index) => {
         const cam = this.cameras[index];
@@ -515,7 +519,7 @@ class StageView {
             const c = tile.querySelector("canvas");
             const w = entry.contentRect.width;
             const h = entry.contentRect.height;
-            if (c && w > 0 && h > 0) {
+            if (c && w > 0 && h > 0 && (c.width !== w || c.height !== h)) {
               c.width = w;
               c.height = h;
             }
