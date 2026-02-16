@@ -187,6 +187,8 @@ class StageView {
     this.dragStartIndex = null;
     this.previousHealthValues = new Map(); // stores previous health values for change detection
     this.healthStats = new Map(); // camera_id -> health object
+    this._healthDisplayTimer = null; // debounce timer for updateHealthDisplay
+    this._healthStateCounters = new Map(); // hysteresis counters for health state transitions
     this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
     this._configSavePromise = null; // serializes config save operations
     this.streamReaders = new Map(); // camera_id -> MjpegStreamReader
@@ -235,7 +237,7 @@ class StageView {
       this.unlistenHealth = await listen("stream-health", (event) => {
         const { camera_id, health } = event.payload;
         this.healthStats.set(camera_id, health);
-        this.updateHealthDisplay();
+        this._scheduleHealthUpdate();
       });
 
       // Listen for stream errors
@@ -909,7 +911,8 @@ class StageView {
 
       if (sameSet) {
         // Camera list unchanged — just refresh the values in place
-        this.updateHealthDisplay();
+        this.previousHealthValues.clear();
+        this._scheduleHealthUpdate();
         return;
       }
       // Camera list changed — tear down and rebuild; clear stale cache
@@ -974,11 +977,19 @@ class StageView {
       for (const [cameraId, health] of Object.entries(healthMap)) {
         this.healthStats.set(cameraId, health);
       }
-      this.updateHealthDisplay();
+      this._scheduleHealthUpdate();
     } catch (err) {
       console.error("Failed to fetch stream health:", err);
-      this.updateHealthDisplay();
+      this._scheduleHealthUpdate();
     }
+  }
+
+  _scheduleHealthUpdate() {
+    if (this._healthDisplayTimer !== null) return;
+    this._healthDisplayTimer = setTimeout(() => {
+      this._healthDisplayTimer = null;
+      this.updateHealthDisplay();
+    }, 1000);
   }
 
   updateHealthDisplay() {
@@ -1076,19 +1087,28 @@ class StageView {
       });
 
       // Determine health state based on FPS
-      let newState;
+      let desiredState;
       if (health.fps > 0) {
-        newState = 'online';
+        desiredState = 'online';
       } else if (health.uptime_secs > 0) {
-        newState = 'warn';
+        desiredState = 'warn';
       } else {
-        newState = 'error';
+        desiredState = 'error';
       }
 
-      // Only update attribute if state changed
+      // Hysteresis: require 3 consecutive same readings before changing
+      const counter = this._healthStateCounters.get(cameraId) || { state: desiredState, count: 0 };
+      if (counter.state === desiredState) {
+        counter.count++;
+      } else {
+        counter.state = desiredState;
+        counter.count = 1;
+      }
+      this._healthStateCounters.set(cameraId, counter);
+
       const prevState = card.getAttribute('data-health-state');
-      if (prevState !== newState) {
-        card.setAttribute('data-health-state', newState);
+      if (counter.count >= 3 && prevState !== desiredState) {
+        card.setAttribute('data-health-state', desiredState);
       }
     });
   }
