@@ -83,6 +83,7 @@ class MjpegStreamReader {
     this.running = false;
     if (this.abortController) this.abortController.abort();
     if (this.latestBitmap) { this.latestBitmap.close(); this.latestBitmap = null; }
+    this._newFrame = false;
   }
 
   _concat(a, b) {
@@ -145,7 +146,7 @@ class MjpegStreamReader {
     }
 
     // Return remaining buffer after last complete frame
-    if (lastFrameEnd > 0) {
+    if (lastFrameEnd !== -1) {
       return buffer.slice(lastFrameEnd);
     }
 
