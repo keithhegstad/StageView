@@ -574,10 +574,6 @@ async fn try_stream_camera(
         url.to_string()
     };
 
-    // Hardware-accelerated decoding (DXVA2/D3D11VA on Windows, VideoToolbox on macOS, VAAPI on Linux).
-    // Must come before -i. Falls back to software decoding silently if the GPU does not support it.
-    args.extend(["-hwaccel".into(), "auto".into()]);
-
     // Add input URL
     args.extend(["-i".into(), input_url]);
 
