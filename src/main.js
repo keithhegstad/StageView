@@ -45,6 +45,7 @@ class MjpegStreamReader {
     this.abortController = null;
     this.running = false;
     this._firstFrame = false;
+    this._newFrame = false;
     this.onFirstFrame = null; // callback
   }
 
@@ -95,6 +96,7 @@ class MjpegStreamReader {
     // Scan for JPEG SOI (0xFFD8) and EOI (0xFFD9) markers
     let searchFrom = 0;
     let lastFrameEnd = -1;
+    let lastFrameData = null;
 
     while (searchFrom < buffer.length - 1) {
       // Find SOI
@@ -119,15 +121,19 @@ class MjpegStreamReader {
 
       // Complete frame: SOI to EOI+2
       const frameEnd = eoiIndex + 2;
-      const frameData = buffer.slice(soiIndex, frameEnd);
+      lastFrameData = buffer.slice(soiIndex, frameEnd);
+      lastFrameEnd = frameEnd;
+      searchFrom = frameEnd;
+    }
 
-      // Decode off the main thread
+    // Decode only the last complete frame found in this chunk
+    if (lastFrameData !== null) {
       try {
-        const blob = new Blob([frameData], { type: 'image/jpeg' });
+        const blob = new Blob([lastFrameData], { type: 'image/jpeg' });
         const bitmap = await createImageBitmap(blob);
-        // Replace latest bitmap (close the old one)
         if (this.latestBitmap) this.latestBitmap.close();
         this.latestBitmap = bitmap;
+        this._newFrame = true;
 
         if (!this._firstFrame) {
           this._firstFrame = true;
@@ -136,9 +142,6 @@ class MjpegStreamReader {
       } catch (e) {
         // Bad JPEG, skip
       }
-
-      lastFrameEnd = frameEnd;
-      searchFrom = frameEnd;
     }
 
     // Return remaining buffer after last complete frame
@@ -156,7 +159,8 @@ class MjpegStreamReader {
   }
 
   draw() {
-    if (this.latestBitmap) {
+    if (this._newFrame && this.latestBitmap) {
+      this._newFrame = false;
       this.ctx.drawImage(this.latestBitmap, 0, 0, this.canvas.width, this.canvas.height);
     }
   }
