@@ -56,6 +56,18 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
           Write-Host "FFmpeg placed at $destPath"
 
+      - name: Debug signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY is SET (length: $($env:TAURI_SIGNING_PRIVATE_KEY.Length))"
+          } else {
+            Write-Host "::error::TAURI_SIGNING_PRIVATE_KEY is EMPTY or NOT SET"
+            exit 1
+          }
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -68,3 +80,5 @@ jobs:
           releaseBody: "See the assets to download and install this version."
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
