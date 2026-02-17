@@ -31,15 +31,30 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Copy FFmpeg sidecar binary
+      - name: Download FFmpeg sidecar binary
         shell: pwsh
         run: |
-          # The ffmpeg binary must exist for the build.
-          # Store it in src-tauri/binaries/ (committed or downloaded).
-          if (!(Test-Path "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")) {
-            Write-Error "FFmpeg sidecar binary not found. Place ffmpeg-x86_64-pc-windows-msvc.exe in src-tauri/binaries/"
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.zip"
+          $zipPath = "$env:RUNNER_TEMP\ffmpeg.zip"
+          $extractPath = "$env:RUNNER_TEMP\ffmpeg"
+          $destPath = "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
+
+          Write-Host "Downloading FFmpeg 8.0.1..."
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $zipPath -UseBasicParsing
+
+          Write-Host "Extracting..."
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+          # Find ffmpeg.exe inside the extracted folder
+          $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          if (-not $ffmpegExe) {
+            Write-Error "ffmpeg.exe not found in archive"
             exit 1
           }
+
+          New-Item -ItemType Directory -Path "src-tauri/binaries" -Force | Out-Null
+          Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
+          Write-Host "FFmpeg placed at $destPath"
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
