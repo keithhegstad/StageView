@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri/main/crates/tauri-cli/config.schema.json",
   "productName": "StageView",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "identifier": "com.stageview.app",
   "build": {
     "frontendDist": "../src"
@@ -24,7 +24,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "RWQCcNfafvAtT1k/IGtDYiUuHuPoyWGRrR+TOZHXAJAMTrpXu7nxTHtM",
+      "pubkey": "RWQgjtkkbU2rgMC0Oaf5mnDSsigcRgcndrS9CgA4BvJPrIOp9a6mTWDE",
       "endpoints": [
         "https://github.com/keithhegstad/StageView/releases/latest/download/latest.json"
       ],
