@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -8,73 +8,17 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tracing::{error, info, debug};
+use tracing::{error, info, debug, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 // ── Data Models ──────────────────────────────────────────────────────────────
-
-// ── Codec Configuration ──────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum Quality {
-    Low,     // 720p max, 10 fps
-    Medium,  // 1080p max, 15 fps
-    High,    // Original resolution, uncapped fps
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum FpsMode {
-    Native,      // No -r flag - use camera's native FPS
-    #[serde(rename = "capped")]
-    Capped(u32), // Add -r N to cap FPS
-}
-
-impl Default for FpsMode {
-    fn default() -> Self {
-        FpsMode::Native
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct CameraCodecSettings {
-    pub quality: Quality,
-    pub fps_mode: FpsMode,
-}
-
-impl Default for CameraCodecSettings {
-    fn default() -> Self {
-        Self {
-            quality: Quality::Medium,
-            fps_mode: FpsMode::Native,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct StreamConfig {
-    pub quality: Quality,
-}
-
-impl Default for StreamConfig {
-    fn default() -> Self {
-        Self {
-            quality: Quality::Medium,
-        }
-    }
-}
-
-// ── Camera Models ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Camera {
     pub id: String,
     pub name: String,
     pub url: String,
-    #[serde(default)]
-    pub codec_override: Option<CameraCodecSettings>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -104,8 +48,6 @@ pub struct AppConfig {
     pub api_port: u16,
     #[serde(default)]
     pub window_state: WindowState,
-    #[serde(default)]
-    pub stream_config: StreamConfig,
 }
 
 fn default_true() -> bool { true }
@@ -120,7 +62,6 @@ impl Default for AppConfig {
             show_camera_names: true,
             api_port: 8090,
             window_state: WindowState::default(),
-            stream_config: StreamConfig::default(),
         }
     }
 }
@@ -146,8 +87,7 @@ pub struct StreamHealth {
     pub last_frame_at: u64, // Unix timestamp in milliseconds
     pub uptime_secs: u64,
     pub resolution: Option<String>, // e.g. "1920x1080"
-    pub quality_setting: String, // "Low", "Medium", "High"
-    pub codec: String, // "MJPEG", "H264"
+    pub codec: String, // "H264 (copy)"
 }
 
 #[derive(Serialize, Clone)]
@@ -162,45 +102,6 @@ struct StreamErrorEvent {
     error: String,
 }
 
-// ── Buffer Pool ──────────────────────────────────────────────────────────────
-
-/// Reusable buffer pool to prevent memory fragmentation
-struct BufferPool {
-    buffers: Mutex<Vec<Vec<u8>>>,
-    max_buffers: usize,
-}
-
-impl BufferPool {
-    fn new(max_buffers: usize) -> Self {
-        Self {
-            buffers: Mutex::new(Vec::new()),
-            max_buffers,
-        }
-    }
-
-    fn acquire(&self) -> Vec<u8> {
-        let mut pool = match self.buffers.lock() {
-            Ok(p) => p,
-            Err(poisoned) => {
-                error!("BufferPool mutex poisoned, recovering");
-                poisoned.into_inner()
-            }
-        };
-        pool.pop().unwrap_or_else(|| Vec::with_capacity(64 * 1024))
-    }
-
-    fn release(&self, mut buf: Vec<u8>) {
-        buf.clear();
-
-        // If lock fails, simply drop the buffer (acceptable failure mode)
-        if let Ok(mut pool) = self.buffers.lock() {
-            if pool.len() < self.max_buffers {
-                pool.push(buf);
-            }
-        }
-    }
-}
-
 // ── App State ────────────────────────────────────────────────────────────────
 
 struct AppState {
@@ -210,8 +111,9 @@ struct AppState {
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
     stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
-    buffer_pool: BufferPool, // Reusable buffer pool for frame processing
     frame_broadcasters: Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Arc<Vec<u8>>>>>>, // camera_id -> frame broadcaster (Arc to avoid cloning ~200KB per frame)
+    init_segments: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>, // camera_id -> cached ftyp+moov initialization segment
+    recent_segments: Arc<Mutex<HashMap<String, VecDeque<Arc<Vec<u8>>>>>>, // camera_id -> cached fragments from last keyframe (for instant client startup)
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -235,6 +137,8 @@ fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> 
 
 #[tauri::command]
 fn start_streams(state: State<AppState>, app: AppHandle) {
+    info!("start_streams called");
+
     // Clone config first, then acquire stream_tasks once to avoid lock ordering issues
     let config = match state.config.lock() {
         Ok(cfg) => cfg.clone(),
@@ -302,26 +206,12 @@ fn stop_streams(state: State<AppState>, app: AppHandle) {
 }
 
 #[tauri::command]
-fn solo_camera(state: State<AppState>, _app: AppHandle, camera_id: String) {
-    // Stop all streams except the solo'd one — the solo stream keeps running
-    let mut tasks = match state.stream_tasks.lock() {
-        Ok(t) => t,
-        Err(_) => {
-            error!("stream_tasks mutex poisoned in solo_camera");
-            return;
-        }
-    };
-    let ids_to_remove: Vec<String> = tasks
-        .keys()
-        .filter(|id| **id != camera_id)
-        .cloned()
-        .collect();
-
-    for id in ids_to_remove {
-        if let Some(handle) = tasks.remove(&id) {
-            handle.abort();
-        }
-    }
+fn solo_camera(_state: State<AppState>, _app: AppHandle, camera_id: String) {
+    // Keep all streams running in solo mode for instant grid recovery.
+    // H.264 copy uses minimal CPU; the frontend simply hides non-solo tiles.
+    // The broadcast channel's receiver_count check skips sending when no HTTP
+    // clients are connected, so background streams have near-zero overhead.
+    info!("Solo mode activated: camera {}", camera_id);
 }
 
 #[tauri::command]
@@ -372,52 +262,86 @@ fn get_stream_health(state: State<AppState>) -> Result<HashMap<String, StreamHea
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
-fn build_mjpeg_args(quality: &Quality) -> Vec<String> {
-    let q_val = match quality {
-        Quality::Low => 10,
-        Quality::Medium => 5,
-        Quality::High => 3,
-    };
-
+/// Build codec args for fMP4 output with H.264 copy (no transcode)
+fn build_h264_copy_args() -> Vec<String> {
     vec![
         "-c:v".to_string(),
-        "mjpeg".to_string(),
-        "-q:v".to_string(),
-        q_val.to_string(),
+        "copy".to_string(),
         "-f".to_string(),
-        "image2pipe".to_string(),
-        "-an".to_string(),
+        "mp4".to_string(),
+        "-movflags".to_string(),
+        "frag_keyframe+empty_moov+default_base_moof".to_string(),
+        "-frag_duration".to_string(),
+        "50000".to_string(), // 50ms fragments for ultra-fast startup
+        "-min_frag_duration".to_string(),
+        "50000".to_string(),
+        "-flush_packets".to_string(),
+        "1".to_string(), // Force immediate writes to stdout
+        "-an".to_string(), // No audio
     ]
 }
 
-fn build_fps_args(fps_mode: &FpsMode) -> Vec<String> {
-    match fps_mode {
-        FpsMode::Native => {
-            // No -r flag - camera streams at native FPS
-            Vec::new()
-        }
-        FpsMode::Capped(fps) => {
-            vec!["-r".to_string(), fps.to_string()]
-        }
-    }
-}
+/// Check if a moof box contains a keyframe (sync sample) by parsing traf→tfhd/trun flags.
+/// Used to cache fragments from the last keyframe for instant client startup.
+fn is_keyframe_fragment(moof_data: &[u8]) -> bool {
+    if moof_data.len() < 16 { return false; }
+    let mut offset = 8; // skip moof box header
 
-/// Build FPS arguments for a camera, considering per-camera overrides and quality defaults
-fn build_fps_args_for_camera(
-    has_camera_override: bool,
-    fps_mode: &FpsMode,
-    quality: &Quality,
-) -> Vec<String> {
-    if has_camera_override {
-        build_fps_args(fps_mode)
-    } else {
-        // No per-camera override: apply quality-based default FPS cap
-        match quality {
-            Quality::Low => vec!["-r".to_string(), "10".to_string()],
-            Quality::Medium => vec!["-r".to_string(), "15".to_string()],
-            Quality::High => Vec::new(), // No FPS cap - output frames as received from camera
+    while offset + 8 <= moof_data.len() {
+        let box_size = u32::from_be_bytes([
+            moof_data[offset], moof_data[offset+1], moof_data[offset+2], moof_data[offset+3]
+        ]) as usize;
+        let box_type = &moof_data[offset+4..offset+8];
+        if box_size < 8 || offset + box_size > moof_data.len() { break; }
+
+        if box_type == b"traf" {
+            let mut traf_off = offset + 8;
+            let mut default_flags: Option<u32> = None;
+
+            while traf_off + 8 <= offset + box_size {
+                let child_size = u32::from_be_bytes([
+                    moof_data[traf_off], moof_data[traf_off+1], moof_data[traf_off+2], moof_data[traf_off+3]
+                ]) as usize;
+                let child_type = &moof_data[traf_off+4..traf_off+8];
+                if child_size < 8 || traf_off + child_size > offset + box_size { break; }
+
+                if child_type == b"tfhd" && child_size >= 16 {
+                    let tfhd_flags = u32::from_be_bytes([0, moof_data[traf_off+9], moof_data[traf_off+10], moof_data[traf_off+11]]);
+                    let mut foff = traf_off + 16; // past header(8) + version/flags(4) + track_id(4)
+                    if tfhd_flags & 0x000001 != 0 { foff += 8; } // base_data_offset
+                    if tfhd_flags & 0x000002 != 0 { foff += 4; } // sample_description_index
+                    if tfhd_flags & 0x000008 != 0 { foff += 4; } // default_sample_duration
+                    if tfhd_flags & 0x000010 != 0 { foff += 4; } // default_sample_size
+                    if tfhd_flags & 0x000020 != 0 && foff + 4 <= traf_off + child_size {
+                        default_flags = Some(u32::from_be_bytes([
+                            moof_data[foff], moof_data[foff+1], moof_data[foff+2], moof_data[foff+3]
+                        ]));
+                    }
+                }
+
+                if child_type == b"trun" && child_size >= 12 {
+                    let trun_flags = u32::from_be_bytes([0, moof_data[traf_off+9], moof_data[traf_off+10], moof_data[traf_off+11]]);
+                    let mut toff = traf_off + 16; // past header(8) + version/flags(4) + sample_count(4)
+                    if trun_flags & 0x000001 != 0 { toff += 4; } // data_offset
+                    if trun_flags & 0x000004 != 0 && toff + 4 <= traf_off + child_size {
+                        // first_sample_flags present — authoritative for first sample
+                        let flags = u32::from_be_bytes([moof_data[toff], moof_data[toff+1], moof_data[toff+2], moof_data[toff+3]]);
+                        return (flags >> 16) & 1 == 0; // sample_is_non_sync_sample == 0 → keyframe
+                    }
+                    // Fall back to default_sample_flags from tfhd
+                    if let Some(df) = default_flags {
+                        return (df >> 16) & 1 == 0;
+                    }
+                    return true; // No explicit flags — assume keyframe (conservative)
+                }
+
+                traf_off += child_size;
+            }
         }
+
+        offset += box_size;
     }
+    false
 }
 
 /// Calculate smart backoff duration based on attempt number.
@@ -441,8 +365,6 @@ async fn stream_camera(
     camera_id: String,
     url: String,
 ) {
-    info!("Starting stream for {} → {}", camera_id, url);
-
     loop {
         // Get current attempt count
         let attempt = {
@@ -459,6 +381,8 @@ async fn stream_camera(
             *count
         };
 
+        info!("Starting stream for {} → {} (attempt {})", camera_id, url, attempt);
+
         // Emit status event before attempting connection
         let _ = app.emit("camera-status", CameraStatusEvent {
             camera_id: camera_id.clone(),
@@ -469,7 +393,6 @@ async fn stream_camera(
         let state = app.state::<AppState>();
         match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url).await {
             Ok(()) => {
-                info!("Stream ended normally for {}", camera_id);
                 // Reset attempt counter on success
                 if let Ok(mut attempts) = state.reconnect_attempts.lock() {
                     attempts.insert(camera_id.clone(), 0);
@@ -477,6 +400,14 @@ async fn stream_camera(
             }
             Err(e) => {
                 error!("Stream failed for {}: {}", camera_id, e);
+                // Only notify the frontend after 3+ failed attempts
+                // to avoid toast-flooding during normal RTP startup retries.
+                if attempt >= 3 {
+                    let _ = app.emit("stream-error", StreamErrorEvent {
+                        camera_id: camera_id.clone(),
+                        error: format!("Stream failed (attempt {}): {}", attempt, e),
+                    });
+                }
             }
         }
 
@@ -494,8 +425,6 @@ async fn stream_camera(
         });
 
         tokio::time::sleep(backoff).await;
-
-        info!("Retrying {} (attempt {})", camera_id, attempt + 1);
     }
 }
 
@@ -513,14 +442,17 @@ async fn try_stream_camera(
     // Use atomic counters so they can be shared with the health update task
     let frame_count = Arc::new(AtomicU64::new(0));
     let bytes_received = Arc::new(AtomicU64::new(0));
-    let last_frame_buffer = Arc::new(Mutex::new(Vec::new()));
 
-    // Create broadcast channel for HTTP MJPEG streaming (Arc<Vec<u8>> avoids cloning frames)
+    info!("Spawning FFmpeg for camera {} ({})", camera_id, url);
+
+    // Create broadcast channel for HTTP streaming (Arc<Vec<u8>> avoids cloning frames)
     {
         let mut broadcasters = state.frame_broadcasters.lock().unwrap();
         broadcasters.entry(camera_id.to_string())
-            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(30).0);
-        info!("Created frame broadcaster for camera: {}", camera_id);
+            .or_insert_with(|| {
+                info!("Created frame broadcaster for camera: {}", camera_id);
+                tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0
+            });
     }
 
     let mut args: Vec<String> = vec![
@@ -530,46 +462,68 @@ async fn try_stream_camera(
     ];
 
     // Rewrite the input URL and add protocol-specific flags
-    let input_url = if url.starts_with("rtp://") || url.starts_with("udp://") {
-        // RTP/UDP multicast: rewrite to udp://@ so ffmpeg joins the group
+    let input_url = if url.starts_with("rtp://") {
+        // RTP multicast: use FFmpeg's native rtp:// protocol handler.
+        // It correctly parses RTP headers and extracts SPS/PPS for H.264.
+        // Do NOT rewrite to udp:// — that strips RTP framing and loses codec params.
+        // Need generous analyzeduration because we join mid-stream and must wait
+        // for a keyframe (IDR) carrying SPS/PPS before FFmpeg can determine dimensions.
+        args.extend([
+            "-analyzeduration".into(), "10000000".into(), // 10s — enough for any GOP size
+            "-probesize".into(),       "10000000".into(), // 10MB probe data
+            "-fflags".into(),          "+genpts+discardcorrupt+fastseek".into(),
+            "-flags".into(),           "low_delay".into(),
+            "-thread_queue_size".into(),"512".into(),
+        ]);
+        url.to_string()
+    } else if url.starts_with("udp://") {
+        // Raw UDP multicast: rewrite to udp://@ so ffmpeg joins the group
         let addr = url
-            .trim_start_matches("rtp://")
             .trim_start_matches("udp://")
             .trim_start_matches('@');
         args.extend([
-            "-analyzeduration".into(), "500000".into(),
-            "-probesize".into(),       "512000".into(),
-            "-fflags".into(),          "+genpts+nobuffer".into(),
+            "-analyzeduration".into(), "2000000".into(),  // 2s analysis
+            "-probesize".into(),       "1000000".into(),  // 1MB probe
+            "-fflags".into(),          "+genpts+nobuffer+discardcorrupt+fastseek".into(),
             "-flags".into(),           "low_delay".into(),
+            "-avioflags".into(),       "direct".into(),
             "-buffer_size".into(),     "2000000".into(),
             "-overrun_nonfatal".into(),"1".into(),
+            "-thread_queue_size".into(),"512".into(),
         ]);
-        format!("udp://@{}", addr)
+        format!("udp://@{}?timeout=10000000", addr)
     } else if url.starts_with("rtsp://") {
         args.extend([
-            "-analyzeduration".into(),   "500000".into(),
-            "-probesize".into(),         "512000".into(),
-            "-fflags".into(),            "nobuffer".into(),
+            "-analyzeduration".into(),   "100000".into(),  // 0.1s for RTSP setup
+            "-probesize".into(),         "50000".into(),   // 50KB probe
+            "-fflags".into(),            "+nobuffer+discardcorrupt+fastseek".into(),
             "-flags".into(),             "low_delay".into(),
+            "-avioflags".into(),         "direct".into(),
             "-rtsp_transport".into(),    "tcp".into(),
             "-allowed_media_types".into(),"video".into(),
+            "-thread_queue_size".into(), "512".into(),
+            "-stimeout".into(),          "10000000".into(), // 10s RTSP connect timeout
         ]);
         url.to_string()
     } else if url.starts_with("srt://") {
         args.extend([
-            "-analyzeduration".into(), "500000".into(),
-            "-probesize".into(),       "512000".into(),
-            "-fflags".into(),          "nobuffer".into(),
+            "-analyzeduration".into(), "50000".into(),
+            "-probesize".into(),       "50000".into(),
+            "-fflags".into(),          "+nobuffer+discardcorrupt+fastseek".into(),
             "-flags".into(),           "low_delay".into(),
+            "-avioflags".into(),       "direct".into(),
+            "-thread_queue_size".into(),"512".into(),
+            "-timeout".into(),         "10000000".into(), // 10s input timeout
         ]);
         url.to_string()
     } else {
-        // HTTP MJPEG, file, or other
+        // Other sources (HTTP, file, etc.)
         args.extend([
-            "-analyzeduration".into(), "500000".into(),
-            "-probesize".into(),       "512000".into(),
-            "-fflags".into(),          "nobuffer".into(),
+            "-analyzeduration".into(), "100000".into(),
+            "-probesize".into(),       "100000".into(),
+            "-fflags".into(),          "+nobuffer+discardcorrupt".into(),
             "-flags".into(),           "low_delay".into(),
+            "-rw_timeout".into(),      "10000000".into(), // 10s I/O timeout
         ]);
         url.to_string()
     };
@@ -577,73 +531,12 @@ async fn try_stream_camera(
     // Add input URL
     args.extend(["-i".into(), input_url]);
 
-    // Get camera from config
-    let camera = {
-        let cfg = state.config.lock()
-            .map_err(|_| "Config mutex poisoned")?;
-        cfg.cameras.iter().find(|c| c.id == camera_id).cloned()
-    };
-
-    let Some(camera) = camera else {
-        error!("Camera {} not found in config", camera_id);
-        return Err("Camera not found in config".into());
-    };
-
-    // Get stream config (global)
-    let stream_config = {
-        let cfg = state.config.lock()
-            .map_err(|_| "Config mutex poisoned")?;
-        cfg.stream_config.clone()
-    };
-
-    // Determine effective quality and FPS mode
-    let quality = camera.codec_override
-        .as_ref()
-        .map(|c| &c.quality)
-        .unwrap_or(&stream_config.quality);
-
-    let fps_mode = camera.codec_override
-        .as_ref()
-        .map(|c| &c.fps_mode)
-        .unwrap_or(&FpsMode::Native);
-
-    // Detect if we should attempt MJPEG passthrough
-    let attempt_passthrough = url.contains("mjpeg") || url.contains("mjpg") || url.ends_with(".mjpeg") || url.ends_with(".mjpg");
-
-    let (encoder_name, mut codec_args, is_passthrough) = if attempt_passthrough {
-        // Attempt MJPEG passthrough - copy codec, no re-encoding
-        info!("Attempting MJPEG passthrough for camera {}", camera_id);
-        ("copy", vec![
-            "-c:v".to_string(), "copy".to_string(),
-            "-f".to_string(), "image2pipe".to_string(),
-            "-an".to_string(),
-        ], true)
-    } else {
-        // Standard MJPEG transcode path
-        ("mjpeg", build_mjpeg_args(quality), false)
-    };
-
-    // Add FPS args only if NOT passthrough (can't change FPS when copying)
-    if !is_passthrough {
-        codec_args.extend(build_fps_args_for_camera(
-            camera.codec_override.is_some(),
-            fps_mode,
-            quality,
-        ));
-    }
-
-    debug!("Using encoder: {} for camera {} (quality: {:?}, fps_mode: {:?}, passthrough: {})",
-           encoder_name, camera_id, quality, fps_mode, is_passthrough);
-
-    // Add codec-specific args
+    // Always use H.264 copy → fMP4 output (no transcoding)
+    let codec_args = build_h264_copy_args();
     for arg in codec_args {
         args.push(arg);
     }
-
-    // Add output
     args.push("pipe:1".to_string());
-
-    debug!("ffmpeg args: {}", args.join(" "));
 
     let mut cmd = Command::new(ffmpeg_path);
     cmd.args(&args)
@@ -662,67 +555,15 @@ async fn try_stream_camera(
         Ok(child) => child,
         Err(e) => {
             error!("Failed to spawn FFmpeg for {}: {}", camera_id, e);
-
-            // Emit error event to frontend
             let _ = app.emit("stream-error", StreamErrorEvent {
                 camera_id: camera_id.to_string(),
                 error: format!("FFmpeg failed: {}", e),
             });
-
-            // If passthrough failed, fall back to MJPEG transcode
-            if is_passthrough {
-                info!("MJPEG passthrough failed for camera {}, falling back to transcode", camera_id);
-                let fallback_args = build_mjpeg_args(quality);
-                let input_end = args.iter().position(|a| a == "-c:v").unwrap_or(args.len());
-                let mut retry_args: Vec<String> = args[..input_end].to_vec();
-                for arg in &fallback_args {
-                    retry_args.push(arg.clone());
-                }
-                retry_args.extend(build_fps_args_for_camera(
-                    camera.codec_override.is_some(),
-                    fps_mode,
-                    quality,
-                ));
-                retry_args.push("pipe:1".to_string());
-
-                let mut retry_cmd = Command::new(ffmpeg_path);
-                retry_cmd.args(&retry_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-
-                #[cfg(windows)]
-                {
-                    const CREATE_NO_WINDOW: u32 = 0x08000000;
-                    retry_cmd.creation_flags(CREATE_NO_WINDOW);
-                }
-
-                match retry_cmd.spawn() {
-                    Ok(child) => child,
-                    Err(e2) => {
-                        error!("MJPEG fallback also failed for {}: {}", camera_id, e2);
-                        return Err(Box::new(e2));
-                    }
-                }
-            } else {
-                return Err(Box::new(e));
-            }
+            return Err(Box::new(e));
         }
     };
 
     // Initialize health entry
-    let quality_str = match quality {
-        Quality::Low => "Low",
-        Quality::Medium => "Medium",
-        Quality::High => "High",
-    }.to_string();
-
-    let codec_str = if is_passthrough {
-        "MJPEG (passthrough)".to_string()
-    } else {
-        "MJPEG".to_string()
-    };
-
     {
         if let Ok(mut health_map) = state.stream_health.lock() {
             health_map.insert(camera_id.to_string(), StreamHealth {
@@ -733,8 +574,7 @@ async fn try_stream_camera(
                 last_frame_at: 0,
                 uptime_secs: 0,
                 resolution: None,
-                quality_setting: quality_str.clone(),
-                codec: codec_str.clone(),
+                codec: "H264 (copy)".to_string(),
             });
         }
     }
@@ -744,9 +584,6 @@ async fn try_stream_camera(
     let health_app = app.clone();
     let health_frame_count = frame_count.clone();
     let health_bytes_received = bytes_received.clone();
-    let health_frame_buffer = last_frame_buffer.clone();
-    let health_quality_str = quality_str.clone();
-    let health_codec_str = codec_str.clone();
 
     let health_task = tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
@@ -779,18 +616,6 @@ async fn try_stream_camera(
 
             let uptime = start_time.elapsed().as_secs().max(1);
 
-            // Get resolution from last frame
-            let resolution = match health_frame_buffer.lock() {
-                Ok(frame_buf) => {
-                    if !frame_buf.is_empty() {
-                        parse_jpeg_resolution(&frame_buf)
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => None,
-            };
-
             let health = StreamHealth {
                 camera_id: health_camera_id.clone(),
                 fps,
@@ -801,9 +626,8 @@ async fn try_stream_camera(
                     .unwrap()
                     .as_millis() as u64,
                 uptime_secs: uptime,
-                resolution,
-                quality_setting: health_quality_str.clone(),
-                codec: health_codec_str.clone(),
+                resolution: None,
+                codec: "H264 (copy)".to_string(),
             };
 
             // Access state through app handle
@@ -819,7 +643,7 @@ async fn try_stream_camera(
         }
     });
 
-    let mut stdout = child.stdout.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
     // Capture stderr in a background task for diagnostics
     let stderr_camera_id = camera_id.to_string();
     let stderr_task = if let Some(stderr) = child.stderr.take() {
@@ -828,115 +652,35 @@ async fn try_stream_camera(
             let reader = tokio::io::BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                error!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
+                // Demote normal H.264 startup noise to debug level.
+                // "non-existing PPS/SPS" and "no frame" are expected when
+                // joining an RTP stream mid-GOP before the first keyframe.
+                if line.contains("non-existing PPS") || line.contains("non-existing SPS")
+                    || line.contains("no frame") || line.contains("Last message repeated")
+                {
+                    debug!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
+                } else {
+                    warn!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
+                }
             }
         }))
     } else {
         None
     };
-    let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
-    let mut frame = state.buffer_pool.acquire(); // Acquire from buffer pool
-    let mut prev_byte: u8 = 0;
-    let mut frame_count_local: u64 = 0;
-    let mut in_frame = false; // true after SOI seen, before frame emitted
 
-    loop {
-        let n = match stdout.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                error!("Read error for {}: {}", camera_id, e);
-                return Err(Box::new(e));
-            }
-        };
+    // Clone Arc references before passing to stream processing
+    let frame_count_clone = frame_count.clone();
+    let bytes_received_clone = bytes_received.clone();
 
-        for &byte in &buf[..n] {
-            frame.push(byte);
-
-            if prev_byte == 0xFF {
-                if byte == 0xD8 {
-                    // SOI marker — start of a new JPEG frame
-                    if in_frame && frame.len() > 2 {
-                        // We hit a new SOI while already in a frame (no EOI seen).
-                        // Discard the incomplete frame data before this SOI.
-                        frame.clear();
-                        frame.push(0xFF);
-                        frame.push(0xD8);
-                    }
-                    in_frame = true;
-                } else if byte == 0xD9 && in_frame {
-                    // EOI marker — frame is complete, emit immediately
-                    if frame.len() > 100 && frame[0] == 0xFF && frame[1] == 0xD8 {
-                        frame_count_local += 1;
-                        frame_count.fetch_add(1, Ordering::Relaxed);
-                        bytes_received.fetch_add(frame.len() as u64, Ordering::Relaxed);
-
-                        // Store latest frame for resolution detection (every 100 frames)
-                        if frame_count_local % 100 == 1 {
-                            if let Ok(mut frame_buf) = last_frame_buffer.lock() {
-                                frame_buf.clear();
-                                frame_buf.extend_from_slice(&frame);
-                            }
-                        }
-
-                        if frame_count_local == 1 {
-                            info!(
-                                "First frame for {} ({} bytes)",
-                                camera_id,
-                                frame.len()
-                            );
-
-                            // Reset reconnect counter on first frame only (avoid mutex contention)
-                            if let Ok(mut attempts) = state.reconnect_attempts.lock() {
-                                attempts.insert(camera_id.to_string(), 0);
-                            }
-
-                            let _ = app.emit(
-                                "camera-status",
-                                CameraStatusEvent {
-                                    camera_id: camera_id.to_string(),
-                                    status: "online".into(),
-                                },
-                            );
-                        }
-
-                        // Broadcast frame to HTTP stream clients (Arc avoids ~200KB clone per send)
-                        if let Ok(broadcasters) = state.frame_broadcasters.lock() {
-                            if let Some(sender) = broadcasters.get(camera_id) {
-                                if sender.receiver_count() > 0 {
-                                    let frame_arc = Arc::new(frame.clone());
-                                    match sender.send(frame_arc) {
-                                        Ok(receivers) => {
-                                            if frame_count.load(Ordering::Relaxed) % 100 == 0 {
-                                                debug!("Broadcast frame to {} HTTP clients for {}", receivers, camera_id);
-                                            }
-                                        }
-                                        Err(_) => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Release buffer back to pool and acquire fresh buffer for next frame
-                    let old_frame = std::mem::replace(&mut frame, state.buffer_pool.acquire());
-                    state.buffer_pool.release(old_frame);
-                    in_frame = false;
-                }
-            }
-
-            // Cap frame size to prevent unbounded memory growth
-            if frame.len() >= 10 * 1024 * 1024 {
-                error!("Frame exceeds 10MB, resetting buffer for {}", camera_id);
-                frame.clear();
-                in_frame = false;
-                prev_byte = 0;
-                continue;
-            }
-
-            prev_byte = byte;
-        }
-    }
+    // Process fMP4 stream (H.264 copy, MSE-ready)
+    process_fmp4_stream(
+        stdout,
+        state,
+        camera_id,
+        &app,
+        frame_count_clone,
+        bytes_received_clone,
+    ).await?;
 
     // Stop background tasks FIRST to prevent race conditions
     health_task.abort();
@@ -949,13 +693,168 @@ async fn try_stream_camera(
         health_map.remove(camera_id);
     }
 
-    // Return buffer to pool last
-    state.buffer_pool.release(frame);
+    let total_frames = frame_count.load(Ordering::Relaxed);
 
     info!(
         "Stream ended for {} after {} frames",
-        camera_id, frame_count_local
+        camera_id, total_frames
     );
+
+    // If FFmpeg exited without producing any frames, mark as offline.
+    // Don't emit stream-error here — the retry wrapper (stream_camera)
+    // handles that after enough failed attempts to avoid toast-flooding.
+    if total_frames == 0 {
+        let _ = app.emit("camera-status", CameraStatusEvent {
+            camera_id: camera_id.to_string(),
+            status: "offline".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Process fMP4 stream (fragmented MP4 with moof/mdat boxes for MSE)
+async fn process_fmp4_stream(
+    mut stdout: tokio::process::ChildStdout,
+    state: &tauri::State<'_, AppState>,
+    camera_id: &str,
+    app: &AppHandle,
+    frame_count: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
+    let mut pending = Vec::new();
+    let mut init_segment_sent = false;
+    let mut init_segment_buffer = Vec::new(); // Accumulate ftyp + moov
+    let mut fragment_buffer: Vec<u8> = Vec::new(); // Batch moof+mdat pairs
+    let mut moof_start: usize = 0; // Track where moof starts in fragment_buffer for keyframe detection
+
+    // Clone broadcast sender once to avoid per-fragment mutex lock acquisition.
+    // With 4+ cameras at 20fps each, this eliminates ~80+ mutex locks/sec.
+    let broadcast_sender = state.frame_broadcasters.lock()
+        .ok()
+        .and_then(|b| b.get(camera_id).cloned());
+
+    loop {
+        let n = match stdout.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                error!("Read error (fMP4) for {}: {}", camera_id, e);
+                return Err(Box::new(e));
+            }
+        };
+
+        pending.extend_from_slice(&buf[..n]);
+
+        // Parse MP4 boxes from pending buffer
+        while pending.len() >= 8 {
+            // Read box size and type
+            let box_size = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+            let box_type = [pending[4], pending[5], pending[6], pending[7]];
+            let box_type_str = std::str::from_utf8(&box_type).unwrap_or("????");
+
+            // Validate box size
+            if box_size < 8 || box_size > 50 * 1024 * 1024 {
+                error!("Invalid MP4 box size {} for {}, resetting buffer", box_size, camera_id);
+                pending.clear();
+                fragment_buffer.clear();
+                break;
+            }
+
+            // Wait for complete box
+            if pending.len() < box_size {
+                break;
+            }
+
+            // Handle initialization segment (ftyp, moov)
+            if box_type_str == "ftyp" || box_type_str == "moov" {
+                init_segment_buffer.extend_from_slice(&pending[..box_size]);
+                pending.drain(..box_size);
+
+                // Once we have moov, send combined init segment
+                if box_type_str == "moov" && !init_segment_sent {
+                    init_segment_sent = true;
+                    let init_segment = Arc::new(init_segment_buffer.clone());
+                    
+                    // Cache initialization segment for late-connecting clients
+                    if let Ok(mut cache) = state.init_segments.lock() {
+                        cache.insert(camera_id.to_string(), init_segment.clone());
+                    }
+                    
+                    // Broadcast combined init segment using pre-cloned sender
+                    if let Some(ref sender) = broadcast_sender {
+                        let _ = sender.send(init_segment);
+                    }
+
+                    // Reset reconnect counter
+                    if let Ok(mut attempts) = state.reconnect_attempts.lock() {
+                        attempts.insert(camera_id.to_string(), 0);
+                    }
+
+                    let _ = app.emit(
+                        "camera-status",
+                        CameraStatusEvent {
+                            camera_id: camera_id.to_string(),
+                            status: "online".into(),
+                        },
+                    );
+                }
+            }
+            // Handle media segments — batch moof+mdat into a single broadcast
+            else if box_type_str == "moof" {
+                // Start of a new fragment: remember where moof starts for keyframe detection
+                moof_start = fragment_buffer.len();
+                bytes_received.fetch_add(box_size as u64, Ordering::Relaxed);
+                fragment_buffer.extend_from_slice(&pending[..box_size]);
+                pending.drain(..box_size);
+            }
+            else if box_type_str == "mdat" {
+                // End of fragment: append mdat and broadcast the complete moof+mdat pair
+                frame_count.fetch_add(1, Ordering::Relaxed);
+                bytes_received.fetch_add(box_size as u64, Ordering::Relaxed);
+                fragment_buffer.extend_from_slice(&pending[..box_size]);
+                pending.drain(..box_size);
+
+                // Check if this fragment starts with a keyframe
+                let is_keyframe = is_keyframe_fragment(&fragment_buffer[moof_start..]);
+
+                // Broadcast complete fragment (moof+mdat) as single unit
+                let fragment_arc = Arc::new(std::mem::take(&mut fragment_buffer));
+
+                // Cache fragment for instant client startup (keep from last keyframe)
+                if let Ok(mut recent) = state.recent_segments.lock() {
+                    let segments = recent.entry(camera_id.to_string())
+                        .or_insert_with(VecDeque::new);
+                    if is_keyframe {
+                        segments.clear(); // Reset: start caching from this keyframe
+                    }
+                    segments.push_back(fragment_arc.clone());
+                    // Safety cap: keep at most 120 fragments (~6s at 50ms)
+                    while segments.len() > 120 {
+                        segments.pop_front();
+                    }
+                }
+
+                if let Some(ref sender) = broadcast_sender {
+                    if sender.receiver_count() > 0 {
+                        let _ = sender.send(fragment_arc);
+                    }
+                }
+            }
+            else {
+                // Skip unknown box types
+                pending.drain(..box_size);
+            }
+        }
+
+        // Prevent unbounded buffer growth
+        if pending.len() > 5 * 1024 * 1024 {
+            error!("fMP4 pending buffer exceeds 5MB for {}, resetting", camera_id);
+            pending.clear();
+            fragment_buffer.clear();
+        }
+    }
 
     Ok(())
 }
@@ -1001,9 +900,6 @@ async fn run_api_server(app: AppHandle, port: u16) {
 
             debug!("API request from {}: {} {}", peer, method, path);
 
-            // Debug: Log all requests
-            info!("HTTP Request: {} {}", method, path);
-
             // Handle CORS preflight
             if method == "OPTIONS" {
                 let response = "HTTP/1.1 204 No Content\r\n\
@@ -1017,32 +913,25 @@ async fn run_api_server(app: AppHandle, port: u16) {
                 return;
             }
 
-            // Handle MJPEG streaming endpoint
+            // Handle streaming endpoint (fMP4 for MSE)
             if path.starts_with("/camera/") && path.ends_with("/stream") {
                 // Extract camera ID from path like "/camera/cam1/stream"
                 let parts: Vec<&str> = path.split('/').collect();
                 if parts.len() >= 3 {
                     let camera_id = parts[2].to_string();
-                    info!("=== MJPEG stream requested for camera: {} ===", camera_id);
-
-                    // Debug: Show available broadcasters
-                    if let Ok(broadcasters) = app_handle.state::<AppState>().frame_broadcasters.lock() {
-                        let available: Vec<_> = broadcasters.keys().cloned().collect();
-                        info!("Available camera broadcasters: {:?}", available);
-                    }
+                    let state_ref = app_handle.state::<AppState>();
 
                     // Get or create broadcast sender for this camera
-                    let state_ref = app_handle.state::<AppState>();
                     let mut rx = {
                         let mut broadcasters = state_ref.frame_broadcasters.lock().unwrap();
                         let sender = broadcasters.entry(camera_id.clone())
-                            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(30).0);
+                            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0);
                         sender.subscribe()
                     };
 
-                    // Send MJPEG HTTP headers
+                    // fMP4 streaming for MSE (H.264 copy, no transcode)
                     let headers = "HTTP/1.1 200 OK\r\n\
-                        Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\
+                        Content-Type: video/mp4\r\n\
                         Access-Control-Allow-Origin: *\r\n\
                         Cache-Control: no-cache, no-store, must-revalidate\r\n\
                         Pragma: no-cache\r\n\
@@ -1052,20 +941,39 @@ async fn run_api_server(app: AppHandle, port: u16) {
                         return;
                     }
 
-                    // Stream frames as they arrive — batched into a single write_all
-                    while let Ok(jpeg_data) = rx.recv().await {
-                        use std::io::Write as IoWrite;
-                        let mut buf = Vec::with_capacity(jpeg_data.len() + 128);
-                        let _ = write!(buf, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg_data.len());
-                        buf.extend_from_slice(&jpeg_data);
-                        buf.extend_from_slice(b"\r\n");
+                    // Send cached initialization segment immediately (ftyp+moov)
+                    let init_segment_opt = state_ref.init_segments.lock()
+                        .ok()
+                        .and_then(|cache| cache.get(&camera_id).cloned());
+                    
+                    if let Some(init_segment) = init_segment_opt {
+                        if stream.write_all(&init_segment).await.is_err() {
+                            return;
+                        }
+                    }
 
-                        if stream.write_all(&buf).await.is_err() {
+                    // Send cached recent fragments (from last keyframe) for instant startup.
+                    // This gives the browser a decodable keyframe immediately instead of
+                    // waiting up to GOP-length (1-3 seconds) for the next live keyframe.
+                    {
+                        let cached_fragments: Vec<Arc<Vec<u8>>> = state_ref.recent_segments.lock()
+                            .ok()
+                            .and_then(|cache| cache.get(&camera_id).map(|q| q.iter().cloned().collect()))
+                            .unwrap_or_default();
+                        for fragment in &cached_fragments {
+                            if stream.write_all(fragment).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+
+                    // Stream MP4 boxes as they arrive
+                    while let Ok(box_data) = rx.recv().await {
+                        if stream.write_all(&box_data).await.is_err() {
                             break;
                         }
                     }
 
-                    info!("HTTP stream client disconnected for {}", camera_id);
                     return;
                 }
             }
@@ -1150,48 +1058,36 @@ fn load_config() -> (AppConfig, String) {
     (config, path_str)
 }
 
-// ── JPEG Resolution Parser ──────────────────────────────────────────────────
-
-/// Extract resolution from JPEG data by parsing SOF (Start of Frame) marker
-fn parse_jpeg_resolution(data: &[u8]) -> Option<String> {
-    if data.len() < 10 || data[0] != 0xFF || data[1] != 0xD8 {
-        return None; // Not a valid JPEG (missing SOI)
-    }
-
-    let mut i = 2;
-    while i + 9 < data.len() {
-        if data[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-
-        let marker = data[i + 1];
-
-        // SOF markers (Start of Frame): 0xC0-0xCF (except 0xC4, 0xC8, 0xCC which are not SOF)
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
-            // SOF structure: FF Cn [length:2] [precision:1] [height:2] [width:2] ...
-            let height = u16::from_be_bytes([data[i + 5], data[i + 6]]);
-            let width = u16::from_be_bytes([data[i + 7], data[i + 8]]);
-            return Some(format!("{}x{}", width, height));
-        }
-
-        // Skip to next marker
-        if i + 3 < data.len() {
-            let length = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-            i += 2 + length;
-        } else {
-            break;
-        }
-    }
-
-    None
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 
 /// Returns the path to the FFmpeg binary (bundled or system).
-fn get_ffmpeg_path() -> PathBuf {
+fn get_ffmpeg_path(app: Option<&AppHandle>) -> PathBuf {
+    // If we have app handle, use Tauri's proper resource resolution
+    if let Some(app_handle) = app {
+        // Try to resolve as a bundled resource
+        // In production, Tauri places sidecar binaries in the resource directory
+        let binary_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        
+        if let Ok(resource_path) = app_handle.path().resolve(binary_name, tauri::path::BaseDirectory::Resource) {
+            if resource_path.exists() {
+                info!("Found FFmpeg via Tauri resource resolver: {}", resource_path.display());
+                return resource_path;
+            }
+        }
+        
+        // Also check next to the executable (alternative location)
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(exe_dir) = current_exe.parent() {
+                let sidecar_path = exe_dir.join(binary_name);
+                if sidecar_path.exists() {
+                    info!("Found FFmpeg next to exe: {}", sidecar_path.display());
+                    return sidecar_path;
+                }
+            }
+        }
+    }
+    
     let exe_dir = std::env::current_exe()
         .unwrap_or_default()
         .parent()
@@ -1199,11 +1095,10 @@ fn get_ffmpeg_path() -> PathBuf {
         .to_path_buf();
 
     // Dev: in src-tauri/binaries/ (next to Cargo.toml)
-    // Build platform-specific sidecar name dynamically
     let dev_binary_name = if cfg!(windows) {
         "ffmpeg-x86_64-pc-windows-msvc.exe".to_string()
     } else {
-        let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
+        let arch = std::env::consts::ARCH;
         let os_target = if cfg!(target_os = "macos") {
             "apple-darwin"
         } else {
@@ -1215,15 +1110,17 @@ fn get_ffmpeg_path() -> PathBuf {
         .join("binaries")
         .join(dev_binary_name);
 
-    // Production: Tauri places sidecar binaries directly next to the exe
+    // Production: Tauri places sidecar binaries directly next to the exe  
     let prod_sidecar = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
 
     if dev_path.exists() {
+        info!("Found FFmpeg in dev binaries: {}", dev_path.display());
         dev_path
     } else if prod_sidecar.exists() {
+        info!("Found FFmpeg next to exe: {}", prod_sidecar.display());
         prod_sidecar
     } else {
-        // Fallback: try PATH
+        warn!("FFmpeg not found in expected locations, falling back to PATH");
         PathBuf::from("ffmpeg")
     }
 }
@@ -1387,14 +1284,15 @@ pub fn run() {
     let _log_guard = setup_logging();
     let (config, config_path) = load_config();
 
-    // Resolve bundled ffmpeg binary path
-    let ffmpeg_path = get_ffmpeg_path();
-    info!("Using ffmpeg at: {}", ffmpeg_path.display());
-
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let api_port = config.api_port;
             let window_state = config.window_state.clone();
+
+            // Resolve bundled ffmpeg binary path using Tauri's API
+            let ffmpeg_path = get_ffmpeg_path(Some(&app.handle()));
+            info!("Using ffmpeg at: {}", ffmpeg_path.display());
 
             app.manage(AppState {
                 config: Mutex::new(config),
@@ -1403,10 +1301,9 @@ pub fn run() {
                 stream_tasks: Mutex::new(HashMap::new()),
                 reconnect_attempts: Mutex::new(HashMap::new()),
                 stream_health: Mutex::new(HashMap::new()),
-                // Pool of 32 buffers: allows 2 buffers per camera for up to 16 simultaneous streams
-                // (one being filled, one being encoded) with room for temporary spikes
-                buffer_pool: BufferPool::new(32),
                 frame_broadcasters: Arc::new(Mutex::new(HashMap::new())),
+                init_segments: Arc::new(Mutex::new(HashMap::new())),
+                recent_segments: Arc::new(Mutex::new(HashMap::new())),
             });
 
             // Restore window position and size with off-screen validation

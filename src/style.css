@@ -22,6 +22,9 @@
 
 html, body {
   height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -41,10 +44,12 @@ button {
 #grid {
   display: grid;
   gap: 2px;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   background: var(--bg);
   transition: grid-template var(--transition);
+  position: absolute;
+  inset: 0;
 }
 
 #grid:empty {
@@ -80,9 +85,22 @@ button {
   width: 100%;
   height: 100%;
   display: none;
+  object-fit: cover;
 }
 
 .camera-tile canvas.has-frame {
+  display: block;
+}
+
+.camera-tile video {
+  width: 100%;
+  height: 100%;
+  display: none;
+  object-fit: cover;
+  background: var(--surface);
+}
+
+.camera-tile video.has-frame {
   display: block;
 }
 
@@ -1071,44 +1089,213 @@ select option {
   }
 }
 
-/* ── Inline Camera Overrides ──────────────────────────────────────────────── */
+/* ── Update Section in Settings ───────────────────────────────────────────── */
 
-.cam-overrides {
+.update-row {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.cam-quality,
-.cam-fps {
-  width: 72px;
-  padding: 4px 6px;
-  margin-top: 0;
+.update-row #current-version {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+.check-update-btn {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.check-update-btn:hover {
+  background: var(--hover);
+  border-color: var(--text-dim);
+}
+
+.check-update-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Update Modal ─────────────────────────────────────────────────────────── */
+
+#update-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 2000;
+  opacity: 0;
+  transition: opacity 250ms ease;
+}
+
+#update-overlay.visible {
+  opacity: 1;
+}
+
+#update-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  width: 440px;
+  max-width: 90vw;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-size: 11px;
-  font-family: inherit;
-  outline: none;
-  cursor: pointer;
-  transition: border-color var(--transition);
-}
-
-.cam-quality:focus,
-.cam-fps:focus {
-  border-color: var(--accent);
-}
-
-.cam-override-field {
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  z-index: 2001;
+  opacity: 0;
+  transition: opacity 250ms ease, transform 250ms ease;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
-.cam-override-label {
-  font-size: 10px;
+#update-modal.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.update-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.update-modal-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-modal-body {
+  padding: 22px;
+}
+
+.update-version-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.update-version-current {
+  font-family: monospace;
+  font-size: 14px;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.7;
+  background: var(--bg);
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.update-arrow {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.update-version-new {
+  font-family: monospace;
+  font-size: 14px;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.update-changelog {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 14px;
+  white-space: pre-wrap;
+}
+
+.update-changelog:empty {
+  display: none;
+}
+
+.update-progress {
+  margin-top: 16px;
+}
+
+.update-progress-bar {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: #3b82f6;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.update-progress-text {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.update-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 22px;
+  border-top: 1px solid var(--border);
+}
+
+.update-later-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 8px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+.update-later-btn:hover {
+  background: var(--hover);
+}
+
+.update-now-btn {
+  background: #3b82f6;
+  color: #fff;
+  border: none;
+  padding: 8px 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.update-now-btn:hover {
+  background: #2563eb;
+}
+
+.update-now-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

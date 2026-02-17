@@ -52,3 +52,9 @@ soak-test-results.csv
 nul
 Untitled.jpg
 verify-frame-blocking.js
+
+# Signing keys (NEVER commit)
+src-tauri/.tauri/
+
+# Build error logs
+src-tauri/build_err.txt

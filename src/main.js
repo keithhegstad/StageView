@@ -1,18 +1,6 @@
 // ── StageView ────────────────────────────────────────────────────────────────
 // Lightweight multi-camera grid viewer with burn-in protection.
-// Streams are rendered natively by the browser via <img src> pointed at
-// the backend's MJPEG HTTP endpoint (multipart/x-mixed-replace).
-
-function waitForTauri(timeout = 5000) {
-  return new Promise((resolve, reject) => {
-    if (window.__TAURI__) return resolve();
-    const start = Date.now();
-    const check = setInterval(() => {
-      if (window.__TAURI__) { clearInterval(check); resolve(); }
-      else if (Date.now() - start > timeout) { clearInterval(check); reject(new Error("Tauri API not available")); }
-    }, 50);
-  });
-}
+// Streams are rendered via video element (H.264/MSE) with fMP4 codec copy.
 
 function invoke(cmd, args) {
   return window.__TAURI__.core.invoke(cmd, args);
@@ -26,51 +14,217 @@ function getCurrentWindow() {
   return window.__TAURI__.window.getCurrentWindow();
 }
 
-function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+function getAppVersion() {
+  return window.__TAURI__.app.getVersion();
 }
 
-// ── Canvas-based MJPEG Stream Reader ─────────────────────────────────────────
-// Reads an MJPEG stream via fetch(), decodes JPEG frames off the main thread
-// with createImageBitmap(), and holds the latest bitmap for rAF rendering.
-// This replaces <img src="mjpeg-url"> to avoid per-frame repaints that saturate
-// the browser rendering pipeline.
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
 
-class MjpegStreamReader {
-  constructor(url, canvas) {
+// ── MSE-based fMP4 Stream Reader ────────────────────────────────────────────
+// Reads fMP4 stream via fetch() and feeds it to a <video> element using
+// Media Source Extensions for hardware-accelerated H.264 decode.
+// No transcoding needed - direct playback of H.264 RTP streams.
+
+class Mp4StreamReader {
+  constructor(url, video) {
     this.url = url;
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.latestBitmap = null;
+    this.video = video;
+    this.mediaSource = null;
+    this.sourceBuffer = null;
     this.abortController = null;
     this.running = false;
     this._firstFrame = false;
-    this._newFrame = false;
-    this.onFirstFrame = null; // callback
+    this.onFirstFrame = null;
+    this.onError = null;
+    this.queue = []; // Buffer queue for segments
+    this.isUpdating = false;
+    this._trimTimer = null; // Periodic buffer trimming
+    this._restarting = false; // Guard against concurrent restarts
+    this._restartCount = 0; // Restart throttle counter
+    this._lastRestartAt = 0; // Timestamp of last restart
+
+    // Bind video event handlers so they can be removed on restart
+    this._onVideoError = (e) => {
+      const msg = this.video.error?.message || '';
+      // MSE parsing errors are recoverable — restart the pipeline
+      if (msg.includes('CHUNK_DEMUXER') || msg.includes('PIPELINE_ERROR')
+          || msg.includes('stream parsing failed') || msg.includes('Append')) {
+        console.warn('[Mp4StreamReader] Recoverable video error, restarting pipeline:', msg);
+        this._restart();
+      } else {
+        if (this.onError) this.onError(msg || 'Video playback error');
+      }
+    };
+    this._onVideoWaiting = () => this._chaseLiveEdge();
+
+    this.video.addEventListener('error', this._onVideoError);
+    this.video.addEventListener('waiting', this._onVideoWaiting);
+
+    this._initMediaSource();
+  }
+
+  /** Create (or recreate) the MediaSource + SourceBuffer pipeline */
+  _initMediaSource() {
+    // Check for MSE support
+    if (!window.MediaSource) {
+      console.error('MediaSource API not supported in this browser');
+      if (this.onError) this.onError('MediaSource API not supported');
+      return;
+    }
+
+    this.mediaSource = new MediaSource();
+    this.video.src = URL.createObjectURL(this.mediaSource);
+
+    this.mediaSource.addEventListener('sourceopen', () => {
+      try {
+        const codec = 'video/mp4; codecs="avc1.42E01E"';
+        if (!MediaSource.isTypeSupported(codec)) {
+          if (this.onError) this.onError('H.264 codec not supported');
+          return;
+        }
+
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(codec);
+        this.sourceBuffer.mode = 'sequence';
+        
+        this.sourceBuffer.addEventListener('updateend', () => {
+          this.isUpdating = false;
+          this._chaseLiveEdge();
+          this._processQueue();
+        });
+
+        this.sourceBuffer.addEventListener('error', (e) => {
+          console.warn('[Mp4StreamReader] SourceBuffer error, restarting pipeline');
+          this._restart();
+        });
+
+        // Start periodic buffer trimming (every 5s) to prevent memory growth
+        if (this._trimTimer) clearInterval(this._trimTimer);
+        this._trimTimer = setInterval(() => this._trimBuffer(), 5000);
+      } catch (e) {
+        if (this.onError) this.onError('Failed to create SourceBuffer');
+      }
+    });
+
+    this.mediaSource.addEventListener('error', (e) => {
+      console.warn('[Mp4StreamReader] MediaSource error, restarting pipeline');
+      this._restart();
+    });
+  }
+
+  /**
+   * Auto-recover from fatal MSE errors (CHUNK_DEMUXER_ERROR, etc).
+   * Tears down the broken MediaSource pipeline and rebuilds it, then
+   * reconnects to the HTTP stream. Throttled to prevent tight loops.
+   */
+  _restart() {
+    if (this._restarting || !this.running) return;
+    this._restarting = true;
+
+    // Throttle: max 1 restart per 3 seconds
+    const now = Date.now();
+    const elapsed = now - this._lastRestartAt;
+    const delay = elapsed < 3000 ? 3000 - elapsed : 0;
+
+    setTimeout(() => {
+      this._lastRestartAt = Date.now();
+      this._restartCount++;
+      console.log(`[Mp4StreamReader] Pipeline restart #${this._restartCount} for ${this.url}`);
+
+      // Abort current fetch
+      if (this.abortController) {
+        this.abortController.abort();
+        this.abortController = null;
+      }
+
+      // Tear down old MSE state
+      this.queue = [];
+      this.isUpdating = false;
+      this._firstFrame = false;
+      if (this._trimTimer) { clearInterval(this._trimTimer); this._trimTimer = null; }
+
+      try {
+        if (this.sourceBuffer && this.mediaSource?.readyState === 'open') {
+          if (!this.sourceBuffer.updating) {
+            this.mediaSource.removeSourceBuffer(this.sourceBuffer);
+          }
+        }
+      } catch (e) { /* ignore cleanup errors */ }
+      try {
+        if (this.mediaSource?.readyState === 'open') {
+          this.mediaSource.endOfStream();
+        }
+      } catch (e) { /* ignore */ }
+      this.sourceBuffer = null;
+      this.mediaSource = null;
+
+      // Rebuild the pipeline and reconnect
+      this._initMediaSource();
+      this._restarting = false;
+      this.start();
+    }, delay);
   }
 
   async start() {
+    if (!this.mediaSource) return;
+
     this.abortController = new AbortController();
     this.running = true;
-    let retryDelay = 1000; // start at 1s, exponential backoff up to 5s
+    let retryDelay = 1000;
+    let bytesReceived = 0;
 
     while (this.running) {
       try {
         const response = await fetch(this.url, { signal: this.abortController.signal });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
         const reader = response.body.getReader();
-        let buffer = new Uint8Array(0);
-        retryDelay = 1000; // reset on successful connect
+        retryDelay = 1000;
+
+        // Start a 15s first-data timeout. If no bytes arrive within 15s
+        // of a successful HTTP connection, the stream source is likely
+        // offline (FFmpeg waiting for multicast data that never comes).
+        let firstDataTimer = null;
+        if (!this._firstFrame) {
+          firstDataTimer = setTimeout(() => {
+            if (!this._firstFrame && this.running) {
+              if (this.onError) this.onError('No data received — camera may be offline');
+            }
+          }, 15000);
+        }
 
         while (this.running) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          buffer = this._concat(buffer, value);
-          buffer = await this._extractFrames(buffer);
+          if (value && value.byteLength > 0) {
+            bytesReceived += value.byteLength;
+            
+            if (this.sourceBuffer) {
+              this.queue.push(value);
+              this._processQueue();
+
+              // Trigger first-frame callback and eagerly play
+              if (!this._firstFrame) {
+                this._firstFrame = true;
+                if (firstDataTimer) { clearTimeout(firstDataTimer); firstDataTimer = null; }
+                this.video.play().catch(() => {});
+                if (this.onFirstFrame) this.onFirstFrame();
+              }
+            }
+          }
         }
       } catch (e) {
         if (e.name === 'AbortError' || !this.running) return;
-        console.error('MJPEG stream error, reconnecting in', retryDelay + 'ms:', e);
+        if (this.onError && bytesReceived === 0) {
+          this.onError('Stream connection failed');
+        }
       }
 
       if (!this.running) return;
@@ -79,91 +233,99 @@ class MjpegStreamReader {
     }
   }
 
+  _processQueue() {
+    if (this.isUpdating || this.queue.length === 0 || !this.sourceBuffer) return;
+
+    try {
+      let segment;
+      if (this.queue.length === 1) {
+        segment = this.queue.shift();
+      } else {
+        // Merge all queued segments into a single appendBuffer call
+        // This reduces MSE overhead when multiple chunks arrive during an update
+        const totalLen = this.queue.reduce((sum, s) => sum + s.byteLength, 0);
+        const merged = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const s of this.queue) {
+          merged.set(s instanceof Uint8Array ? s : new Uint8Array(s.buffer || s), offset);
+          offset += s.byteLength;
+        }
+        this.queue = [];
+        segment = merged;
+      }
+      this.isUpdating = true;
+      this.sourceBuffer.appendBuffer(segment);
+    } catch (e) {
+      this.isUpdating = false;
+      this.queue = [];
+      // QuotaExceededError: buffer full — trim aggressively and retry next tick
+      if (e.name === 'QuotaExceededError') {
+        this._trimBuffer();
+      } else if (e.name === 'InvalidStateError') {
+        // SourceBuffer removed or MediaSource closed — need full restart
+        console.warn('[Mp4StreamReader] InvalidStateError in appendBuffer, restarting');
+        this._restart();
+      }
+    }
+  }
+
+  /** Jump to the live edge if playback falls behind */
+  _chaseLiveEdge() {
+    if (!this.video || this.video.readyState < 2) return;
+    const buffered = this.video.buffered;
+    if (buffered.length === 0) return;
+    
+    const end = buffered.end(buffered.length - 1);
+    const current = this.video.currentTime;
+    
+    // If more than 0.5s behind live edge, jump forward
+    if (end - current > 0.5) {
+      this.video.currentTime = end - 0.05; // 50ms behind live
+    }
+  }
+
+  /** Trim old buffer data to prevent unbounded memory growth */
+  _trimBuffer() {
+    if (!this.sourceBuffer || this.sourceBuffer.updating) return;
+    if (!this.video || this.video.buffered.length === 0) return;
+    
+    const buffered = this.video.buffered;
+    const end = buffered.end(buffered.length - 1);
+    const start = buffered.start(0);
+    
+    // Keep only the last 4 seconds of data
+    if (end - start > 4) {
+      try {
+        this.sourceBuffer.remove(start, end - 3);
+      } catch (e) { /* ignore */ }
+    }
+  }
+
   stop() {
     this.running = false;
     if (this.abortController) this.abortController.abort();
-    if (this.latestBitmap) { this.latestBitmap.close(); this.latestBitmap = null; }
-    this._newFrame = false;
-  }
+    if (this._trimTimer) { clearInterval(this._trimTimer); this._trimTimer = null; }
+    this.queue = [];
+    this._firstFrame = false;
 
-  _concat(a, b) {
-    const result = new Uint8Array(a.length + b.length);
-    result.set(a, 0);
-    result.set(b, a.length);
-    return result;
-  }
+    // Remove video event listeners
+    this.video.removeEventListener('error', this._onVideoError);
+    this.video.removeEventListener('waiting', this._onVideoWaiting);
 
-  async _extractFrames(buffer) {
-    // Scan for JPEG SOI (0xFFD8) and EOI (0xFFD9) markers
-    let searchFrom = 0;
-    let lastFrameEnd = -1;
-    let lastFrameData = null;
-
-    while (searchFrom < buffer.length - 1) {
-      // Find SOI
-      let soiIndex = -1;
-      for (let i = searchFrom; i < buffer.length - 1; i++) {
-        if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
-          soiIndex = i;
-          break;
-        }
+    try {
+      if (this.sourceBuffer && !this.sourceBuffer.updating) {
+        this.mediaSource.removeSourceBuffer(this.sourceBuffer);
       }
-      if (soiIndex === -1) break;
-
-      // Find EOI after SOI
-      let eoiIndex = -1;
-      for (let i = soiIndex + 2; i < buffer.length - 1; i++) {
-        if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
-          eoiIndex = i;
-          break;
-        }
+      if (this.mediaSource.readyState === 'open') {
+        this.mediaSource.endOfStream();
       }
-      if (eoiIndex === -1) break; // Incomplete frame, wait for more data
-
-      // Complete frame: SOI to EOI+2
-      const frameEnd = eoiIndex + 2;
-      lastFrameData = buffer.slice(soiIndex, frameEnd);
-      lastFrameEnd = frameEnd;
-      searchFrom = frameEnd;
+    } catch (e) {
+      // Ignore cleanup errors
     }
-
-    // Decode only the last complete frame found in this chunk
-    if (lastFrameData !== null) {
-      try {
-        const blob = new Blob([lastFrameData], { type: 'image/jpeg' });
-        const bitmap = await createImageBitmap(blob);
-        if (this.latestBitmap) this.latestBitmap.close();
-        this.latestBitmap = bitmap;
-        this._newFrame = true;
-
-        if (!this._firstFrame) {
-          this._firstFrame = true;
-          if (this.onFirstFrame) this.onFirstFrame();
-        }
-      } catch (e) {
-        // Bad JPEG, skip
-      }
-    }
-
-    // Return remaining buffer after last complete frame
-    if (lastFrameEnd !== -1) {
-      return buffer.slice(lastFrameEnd);
-    }
-
-    // If buffer is growing too large without finding frames, trim it
-    if (buffer.length > 5 * 1024 * 1024) {
-      console.warn('MJPEG buffer exceeded 5MB without complete frame, resetting');
-      return new Uint8Array(0);
-    }
-
-    return buffer;
   }
 
   draw() {
-    if (this._newFrame && this.latestBitmap) {
-      this._newFrame = false;
-      this.ctx.drawImage(this.latestBitmap, 0, 0, this.canvas.width, this.canvas.height);
-    }
+    // MSE handles rendering automatically, no manual draw needed
   }
 }
 
@@ -191,10 +353,11 @@ class StageView {
     this._healthStateCounters = new Map(); // hysteresis counters for health state transitions
     this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
     this._configSavePromise = null; // serializes config save operations
-    this.streamReaders = new Map(); // camera_id -> MjpegStreamReader
-    this._rafId = null;
+    this.streamReaders = new Map(); // camera_id -> Mp4StreamReader
+    this._countdownTimer = null;
     this._idleTimer = null;
     this._isIdle = false;
+    this._pendingUpdate = null; // cached update object from plugin-updater
     this.init();
   }
 
@@ -240,34 +403,39 @@ class StageView {
         this._scheduleHealthUpdate();
       });
 
-      // Listen for stream errors
+      // Listen for stream errors (deduplicate per camera to prevent toast flood)
+      this._activeErrorToasts = this._activeErrorToasts || new Map();
       this.unlistenStreamError = await listen("stream-error", (event) => {
         const { camera_id, error } = event.payload;
+        // Skip if a toast for this camera is already showing
+        if (this._activeErrorToasts.has(camera_id)) return;
         const camera = this.cameras.find(c => c.id === camera_id);
         const cameraName = camera ? camera.name : camera_id;
-
+        this._activeErrorToasts.set(camera_id, true);
         this.showToast(`${cameraName}: ${error}`, 'error');
-
-        console.error(`Stream error for ${cameraName}:`, error);
+        // Clear duplicate guard after toast duration (10s) + fade (300ms)
+        setTimeout(() => this._activeErrorToasts.delete(camera_id), 10300);
       });
 
       // Listen for reload-config event
       await listen("reload-config", () => {
-        console.log("Config reloaded, refreshing UI...");
         location.reload();
       });
+
+      // Start FFmpeg immediately (fire-and-forget) so streams begin probing
+      // before the DOM is built. By the time fetch() connects from the UI,
+      // FFmpeg may already have the init segment cached for instant playback.
+      if (this.cameras.length > 0) {
+        invoke("start_streams").catch(err => {
+          console.error("Failed to start streams:", err);
+        });
+      }
 
       this.render();
       this._startRenderLoop();
       this.startShuffleTimer();
 
-      // Tell the backend to start ffmpeg for each camera
-      if (this.cameras.length > 0) {
-        await invoke("start_streams");
-      }
-
     } catch (err) {
-      console.error("StageView init failed:", err);
       this.render();
     }
 
@@ -276,6 +444,9 @@ class StageView {
     this.updateToolbar();
     this.setupWindowStatePersistence();
     this.setupIdleHiding();
+
+    // Set version label & auto-check for updates (silent)
+    this.initUpdater();
   }
 
   // ── UI Event Binding ───────────────────────────────────────────────────
@@ -300,44 +471,13 @@ class StageView {
     document.getElementById('settings-close-btn').addEventListener('click', () => this.closeSettings());
     document.getElementById('add-camera-btn').addEventListener('click', () => this.addCameraField());
     document.getElementById('save-settings-btn').addEventListener('click', () => this.saveSettings());
+    document.getElementById('check-update-btn').addEventListener('click', () => this.checkForUpdates(true));
 
-    // Inline camera quality/fps dropdown delegation
-    const cameraList = document.getElementById('camera-list');
-    if (cameraList && !cameraList.dataset.inlineListenerBound) {
-      cameraList.addEventListener('change', (e) => {
-        const entry = e.target.closest('.camera-entry');
-        if (!entry) return;
-        const idx = parseInt(entry.dataset.index);
-        if (isNaN(idx) || !this.cameras[idx]) return;
-
-        if (e.target.classList.contains('cam-quality')) {
-          const val = e.target.value;
-          if (val === '') {
-            // "Global" selected — remove override
-            delete this.cameras[idx].codec_override;
-          } else {
-            if (!this.cameras[idx].codec_override) {
-              this.cameras[idx].codec_override = { quality: val, fps_mode: 'native' };
-            } else {
-              this.cameras[idx].codec_override.quality = val;
-            }
-          }
-        }
-
-        if (e.target.classList.contains('cam-fps')) {
-          const val = e.target.value;
-          if (!this.cameras[idx].codec_override) {
-            this.cameras[idx].codec_override = { quality: 'medium', fps_mode: 'native' };
-          }
-          if (val === 'native') {
-            this.cameras[idx].codec_override.fps_mode = 'native';
-          } else {
-            this.cameras[idx].codec_override.fps_mode = { capped: parseInt(val) };
-          }
-        }
-      });
-      cameraList.dataset.inlineListenerBound = "true";
-    }
+    // Update modal buttons
+    document.getElementById('update-close-btn').addEventListener('click', () => this.closeUpdateModal());
+    document.getElementById('update-overlay').addEventListener('click', () => this.closeUpdateModal());
+    document.getElementById('update-later-btn').addEventListener('click', () => this.closeUpdateModal());
+    document.getElementById('update-now-btn').addEventListener('click', () => this.installUpdate());
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -364,10 +504,6 @@ class StageView {
     grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
     grid.style.position = "";
 
-    if (this._resizeObserver) {
-      this._resizeObserver.disconnect();
-      this._resizeObserver = null;
-    }
     grid.innerHTML = this.displayOrder
       .map((index) => {
         const cam = this.cameras[index];
@@ -391,7 +527,7 @@ class StageView {
     return `
       <div class="camera-tile" data-id="${cam.id}">
         <div class="loading-spinner"></div>
-        <canvas></canvas>
+        <video autoplay muted playsinline crossorigin="anonymous"></video>
         <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
         <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${escapeHtml(cam.name)}</div>
       </div>
@@ -421,20 +557,19 @@ class StageView {
     // Stop any existing stream readers before creating new ones
     this._stopAllReaders();
 
-    // Create MjpegStreamReader for each tile's <canvas>
+    // Create stream reader for each tile
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      const canvas = tile.querySelector("canvas");
       const camId = tile.dataset.id;
-      if (!canvas || !camId) return;
+      if (!camId) return;
 
       const url = `http://localhost:${this.apiPort}/camera/${camId}/stream`;
-      const reader = new MjpegStreamReader(url, canvas);
-
-      // Size the canvas to match tile dimensions (update on resize)
-      this._sizeCanvas(canvas, tile);
-
+      const video = tile.querySelector("video");
+      if (!video) return;
+      
+      const reader = new Mp4StreamReader(url, video);
+      
       reader.onFirstFrame = () => {
-        canvas.classList.add("has-frame");
+        video.classList.add("has-frame");
         const spinner = tile.querySelector(".loading-spinner");
         if (spinner) spinner.style.display = "none";
         const statusEl = tile.querySelector(".camera-status");
@@ -442,6 +577,10 @@ class StageView {
           statusEl.classList.remove("offline", "reconnecting");
         }
       };
+
+      // No onError handler — transient MSE/stream errors are auto-recovered
+      // by the pipeline restart logic. Only true failures (3+ backend retries)
+      // show a toast via the "stream-error" Tauri event.
 
       this.streamReaders.set(camId, reader);
       reader.start();
@@ -475,21 +614,18 @@ class StageView {
   // ── Canvas Rendering Helpers ────────────────────────────────────────────
 
   _startRenderLoop() {
-    if (this._rafId) return;
-    const loop = () => {
-      for (const reader of this.streamReaders.values()) {
-        reader.draw();
-      }
+    if (this._countdownTimer) return;
+    // Countdown only needs 1 update per second.
+    // MSE handles video rendering automatically — no manual draw() needed.
+    this._countdownTimer = setInterval(() => {
       this.updateCountdown();
-      this._rafId = requestAnimationFrame(loop);
-    };
-    this._rafId = requestAnimationFrame(loop);
+    }, 1000);
   }
 
   _stopRenderLoop() {
-    if (this._rafId) {
-      cancelAnimationFrame(this._rafId);
-      this._rafId = null;
+    if (this._countdownTimer) {
+      clearInterval(this._countdownTimer);
+      this._countdownTimer = null;
     }
   }
 
@@ -498,38 +634,6 @@ class StageView {
       reader.stop();
     }
     this.streamReaders.clear();
-  }
-
-  _sizeCanvas(canvas, container) {
-    const resize = () => {
-      const rect = container.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        canvas.width = rect.width;
-        canvas.height = rect.height;
-      }
-    };
-    resize();
-    if (!this._resizeObserver) {
-      let resizeScheduled = false;
-      this._resizeObserver = new ResizeObserver((entries) => {
-        if (resizeScheduled) return;
-        resizeScheduled = true;
-        requestAnimationFrame(() => {
-          resizeScheduled = false;
-          for (const entry of entries) {
-            const tile = entry.target;
-            const c = tile.querySelector("canvas");
-            const w = entry.contentRect.width;
-            const h = entry.contentRect.height;
-            if (c && w > 0 && h > 0 && (c.width !== w || c.height !== h)) {
-              c.width = w;
-              c.height = h;
-            }
-          }
-        });
-      });
-    }
-    this._resizeObserver.observe(container);
   }
 
   // ── Burn-in Shuffle ─────────────────────────────────────────────────────
@@ -608,19 +712,15 @@ class StageView {
 
     const grid = document.getElementById("grid");
 
-    // Hide all tiles except the solo'd one; stop non-solo stream readers
+    // Hide non-solo tiles but keep all stream readers running.
+    // Hidden video elements consume minimal resources, and FFmpeg stays active
+    // in the backend, so switching back to grid view is instant.
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       if (tile.dataset.id === cam.id) {
         tile.classList.add("solo");
         tile.style.display = "";
       } else {
         tile.style.display = "none";
-        // Stop the reader for non-solo cameras
-        const reader = this.streamReaders.get(tile.dataset.id);
-        if (reader) {
-          reader.stop();
-          this.streamReaders.delete(tile.dataset.id);
-        }
       }
     });
 
@@ -629,7 +729,7 @@ class StageView {
     grid.style.gridTemplateRows = "1fr";
     grid.style.position = "";
 
-    // Tell backend to stop non-solo streams (save resources)
+    // Notify backend (streams stay running for instant grid recovery)
     await invoke("solo_camera", { cameraId: cam.id });
 
     this.updateToolbar();
@@ -642,11 +742,27 @@ class StageView {
     if (this.soloIndex === null) return;
     this.soloIndex = null;
 
-    // Restart all streams
-    await invoke("grid_view");
+    const grid = document.getElementById("grid");
+    const cols = Math.ceil(Math.sqrt(this.cameras.length));
+    const rows = Math.ceil(this.cameras.length / cols);
 
-    // Re-render using the current layout mode (grid or PIP)
-    this.render();
+    // Restore grid layout and show all tiles instantly (no DOM rebuild).
+    // All stream readers stayed running, so cameras appear immediately.
+    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+      tile.classList.remove("solo");
+      tile.style.display = "";
+    });
+
+    // Restore display order from shuffle state
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+      const camId = tile.dataset.id;
+      const camIndex = this.cameras.findIndex(c => c.id === camId);
+      const orderPos = this.displayOrder.indexOf(camIndex);
+      tile.style.order = orderPos >= 0 ? orderPos : 0;
+    });
 
     this.updateToolbar();
     this.closeCameraMenu();
@@ -881,17 +997,6 @@ class StageView {
     document.getElementById("api-port").value = this.apiPort;
     this.renderCameraList();
     this.injectHealthSection();
-
-    // Load quality setting
-    try {
-      const config = await invoke("get_config");
-      const qualitySelect = document.getElementById("quality-preset-select");
-      if (config.stream_config?.quality && qualitySelect) {
-        qualitySelect.value = config.stream_config.quality;
-      }
-    } catch (err) {
-      console.error("Failed to load quality setting:", err);
-    }
   }
 
   injectHealthSection() {
@@ -946,10 +1051,6 @@ class StageView {
                 <div class="health-metric">
                   <span class="health-label">Resolution:</span>
                   <span class="health-value" data-metric="resolution">--</span>
-                </div>
-                <div class="health-metric">
-                  <span class="health-label">Quality:</span>
-                  <span class="health-value" data-metric="quality">--</span>
                 </div>
                 <div class="health-metric">
                   <span class="health-label">Codec:</span>
@@ -1019,7 +1120,6 @@ class StageView {
       const bitrateEl = card.querySelector('[data-metric="bitrate"]');
       const uptimeEl = card.querySelector('[data-metric="uptime"]');
       const resolutionEl = card.querySelector('[data-metric="resolution"]');
-      const qualityEl = card.querySelector('[data-metric="quality"]');
       const codecEl = card.querySelector('[data-metric="codec"]');
 
       // Get previous values for this camera
@@ -1070,12 +1170,6 @@ class StageView {
         resolutionEl.textContent = resolutionText;
       }
 
-      // Update Quality Setting
-      const qualityText = health.quality_setting || "--";
-      if (qualityEl && prevValues.quality !== qualityText) {
-        qualityEl.textContent = qualityText;
-      }
-
       // Update Codec
       const codecText = health.codec || "--";
       if (codecEl && prevValues.codec !== codecText) {
@@ -1089,7 +1183,6 @@ class StageView {
         bitrateUnit: useMbps ? 'Mbps' : 'kbps',
         uptime: uptimeText,
         resolution: resolutionText,
-        quality: qualityText,
         codec: codecText
       });
 
@@ -1150,6 +1243,163 @@ class StageView {
     }, duration);
   }
 
+  // ── Update Logic ──────────────────────────────────────────────────────────
+
+  async initUpdater() {
+    try {
+      const ver = await getAppVersion();
+      const versionEl = document.getElementById('current-version');
+      if (versionEl) versionEl.textContent = 'v' + ver;
+    } catch (_) {}
+
+    // Silent auto-check after 3 seconds
+    setTimeout(() => this.checkForUpdates(false), 3000);
+  }
+
+  async checkForUpdates(manual = false) {
+    const btn = document.getElementById('check-update-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Checking...';
+    }
+
+    try {
+      const { check } = window.__TAURI_PLUGIN_UPDATER__ || await import('@tauri-apps/plugin-updater');
+      const update = await check();
+
+      if (update?.available) {
+        this._pendingUpdate = update;
+        this.showUpdateModal(update);
+      } else if (manual) {
+        this.showToast('You\'re on the latest version', 'success');
+      }
+    } catch (err) {
+      console.error('Update check failed:', err);
+      if (manual) {
+        this.showToast('Update check failed: ' + err, 'error');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Check for Updates';
+      }
+    }
+  }
+
+  showUpdateModal(update) {
+    const overlay = document.getElementById('update-overlay');
+    const modal = document.getElementById('update-modal');
+    const curVer = document.getElementById('update-current-ver');
+    const newVer = document.getElementById('update-new-ver');
+    const changelog = document.getElementById('update-changelog');
+    const progress = document.getElementById('update-progress');
+    const footer = document.getElementById('update-footer');
+    const nowBtn = document.getElementById('update-now-btn');
+
+    curVer.textContent = 'v' + (update.currentVersion || '');
+    newVer.textContent = 'v' + (update.version || '');
+    changelog.textContent = update.body || '';
+
+    // Reset state
+    progress.classList.add('hidden');
+    footer.style.display = '';
+    nowBtn.disabled = false;
+    nowBtn.textContent = 'Update Now';
+
+    overlay.classList.remove('hidden');
+    modal.classList.remove('hidden');
+    requestAnimationFrame(() => {
+      overlay.classList.add('visible');
+      modal.classList.add('visible');
+    });
+  }
+
+  closeUpdateModal() {
+    const overlay = document.getElementById('update-overlay');
+    const modal = document.getElementById('update-modal');
+
+    overlay.classList.remove('visible');
+    modal.classList.remove('visible');
+
+    setTimeout(() => {
+      overlay.classList.add('hidden');
+      modal.classList.add('hidden');
+    }, 250);
+  }
+
+  async installUpdate() {
+    const update = this._pendingUpdate;
+    if (!update) return;
+
+    const nowBtn = document.getElementById('update-now-btn');
+    const laterBtn = document.getElementById('update-later-btn');
+    const closeBtn = document.getElementById('update-close-btn');
+    const progress = document.getElementById('update-progress');
+    const progressFill = document.getElementById('update-progress-fill');
+    const progressText = document.getElementById('update-progress-text');
+
+    // Disable buttons during download
+    nowBtn.disabled = true;
+    nowBtn.textContent = 'Downloading...';
+    laterBtn.style.display = 'none';
+    closeBtn.style.display = 'none';
+    progress.classList.remove('hidden');
+    progressFill.style.width = '0%';
+    progressText.textContent = 'Downloading...';
+
+    try {
+      let downloaded = 0;
+      let contentLength = 0;
+
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength || 0;
+            break;
+          case 'Progress':
+            downloaded += event.data.chunkLength || 0;
+            if (contentLength > 0) {
+              const pct = Math.min(100, Math.round((downloaded / contentLength) * 100));
+              progressFill.style.width = pct + '%';
+              const mb = (downloaded / 1048576).toFixed(1);
+              const totalMb = (contentLength / 1048576).toFixed(1);
+              progressText.textContent = `${mb} / ${totalMb} MB (${pct}%)`;
+            }
+            break;
+          case 'Finished':
+            progressFill.style.width = '100%';
+            progressText.textContent = 'Restarting...';
+            break;
+        }
+      });
+
+      // The app will restart automatically via the NSIS passive installer
+      // If for some reason it didn't, prompt the user
+      setTimeout(() => {
+        progressText.textContent = 'Update installed. Please restart the app.';
+        nowBtn.textContent = 'Restart';
+        nowBtn.disabled = false;
+        nowBtn.onclick = async () => {
+          try {
+            const { relaunch } = window.__TAURI__.process;
+            await relaunch();
+          } catch (_) {
+            progressText.textContent = 'Please close and reopen StageView.';
+          }
+        };
+      }, 3000);
+
+    } catch (err) {
+      console.error('Update install failed:', err);
+      progressText.textContent = 'Update failed: ' + err;
+      nowBtn.textContent = 'Retry';
+      nowBtn.disabled = false;
+      laterBtn.style.display = '';
+      closeBtn.style.display = '';
+      nowBtn.onclick = () => this.installUpdate();
+    }
+  }
+
   closeSettings() {
     const overlay = document.getElementById("settings-overlay");
     const panel = document.getElementById("settings");
@@ -1179,37 +1429,11 @@ class StageView {
     list.innerHTML = this.cameras
       .map(
         (cam, i) => {
-          const q = cam.codec_override?.quality || '';
-          const fm = cam.codec_override?.fps_mode;
-          let fpsVal = 'native';
-          if (fm && typeof fm === 'object' && fm.capped) fpsVal = String(fm.capped);
-          else if (fm === 'native') fpsVal = 'native';
-
           return `
       <div class="camera-entry" data-index="${i}">
         <span class="api-index" title="API: /api/solo/${i + 1}">Camera ${i + 1}</span>
         <input type="text" placeholder="Camera name" value="${escapeHtml(cam.name)}" data-field="name" />
         <input type="text" placeholder="rtp://224.1.2.4:4000" value="${escapeHtml(cam.url)}" data-field="url" />
-        <div class="cam-overrides">
-          <div class="cam-override-field">
-            <span class="cam-override-label">Quality</span>
-            <select class="cam-quality" title="Quality override">
-              <option value=""${q === '' ? ' selected' : ''}>Global</option>
-              <option value="low"${q === 'low' ? ' selected' : ''}>Low</option>
-              <option value="medium"${q === 'medium' ? ' selected' : ''}>Med</option>
-              <option value="high"${q === 'high' ? ' selected' : ''}>High</option>
-            </select>
-          </div>
-          <div class="cam-override-field">
-            <span class="cam-override-label">FPS</span>
-            <select class="cam-fps" title="FPS override">
-              <option value="native"${fpsVal === 'native' ? ' selected' : ''}>Native</option>
-              <option value="5"${fpsVal === '5' ? ' selected' : ''}>5 fps</option>
-              <option value="10"${fpsVal === '10' ? ' selected' : ''}>10 fps</option>
-              <option value="15"${fpsVal === '15' ? ' selected' : ''}>15 fps</option>
-            </select>
-          </div>
-        </div>
         <button class="remove-btn" data-remove-index="${i}">✕</button>
       </div>
     `;
@@ -1262,7 +1486,7 @@ class StageView {
     const entries = document.querySelectorAll("#camera-list .camera-entry");
     const cameras = [];
 
-    // Build a map of existing cameras by URL for ID and codec_override preservation
+    // Build a map of existing cameras by URL for ID preservation
     const existingCamerasMap = new Map(this.cameras.map(c => [c.url, c]));
 
     entries.forEach((entry) => {
@@ -1275,21 +1499,6 @@ class StageView {
           name: name || `Camera ${cameras.length + 1}`,
           url,
         };
-        // Read inline quality/fps dropdowns
-        const qualitySel = entry.querySelector('.cam-quality');
-        const fpsSel = entry.querySelector('.cam-fps');
-        if (qualitySel && fpsSel) {
-          const qVal = qualitySel.value;
-          const fVal = fpsSel.value;
-          if (qVal !== '' || fVal !== 'native') {
-            camera.codec_override = {
-              quality: qVal || 'medium',
-              fps_mode: fVal === 'native' ? 'native' : { capped: parseInt(fVal) },
-            };
-          }
-        } else if (existingCamera?.codec_override) {
-          camera.codec_override = existingCamera.codec_override;
-        }
         cameras.push(camera);
       }
     });
@@ -1303,11 +1512,6 @@ class StageView {
     const showCameraNames = document.getElementById("show-camera-names").checked;
     const apiPort = parseInt(document.getElementById("api-port").value, 10) || 8090;
 
-    // Save quality setting
-    const streamConfig = {
-      quality: document.getElementById("quality-preset-select").value,
-    };
-
     try {
       // Read existing config to preserve window_state and other fields
       const config = await invoke("get_config");
@@ -1316,7 +1520,6 @@ class StageView {
       config.show_status_dots = showStatusDots;
       config.show_camera_names = showCameraNames;
       config.api_port = apiPort;
-      config.stream_config = streamConfig;
 
       await invoke("save_config", { config });
 
@@ -1337,7 +1540,6 @@ class StageView {
       }
       this.closeSettings();
     } catch (err) {
-      console.error("Failed to save settings:", err);
       this.showToast("Failed to save settings: " + err, 'error');
     }
   }
@@ -1372,7 +1574,6 @@ class StageView {
       this.displayOrder = this.cameras.map((_, i) => i); // resync display order after manual reorder
       this.render();
       this.saveCameraOrder().catch(err => {
-        console.error("Failed to save camera order:", err);
         this.showToast("Failed to save camera order", 'error');
       });
     }
@@ -1449,7 +1650,7 @@ class StageView {
           });
           lastSavedState = newState;
         } catch (err) {
-          console.error("Failed to save window state:", err);
+          // Silently fail
         }
       }, 2000);
     };
@@ -1496,11 +1697,8 @@ class StageView {
 
 let app;
 
-window.addEventListener("DOMContentLoaded", async () => {
-  try {
-    await waitForTauri();
-  } catch (e) {
-    console.error("Tauri API not found:", e);
+window.addEventListener("DOMContentLoaded", () => {
+  if (window.__TAURI__) {
+    app = new StageView();
   }
-  app = new StageView();
 });

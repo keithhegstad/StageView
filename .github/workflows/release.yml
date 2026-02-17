@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Copy FFmpeg sidecar binary
+        shell: pwsh
+        run: |
+          # The ffmpeg binary must exist for the build.
+          # Store it in src-tauri/binaries/ (committed or downloaded).
+          if (!(Test-Path "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")) {
+            Write-Error "FFmpeg sidecar binary not found. Place ffmpeg-x86_64-pc-windows-msvc.exe in src-tauri/binaries/"
+            exit 1
+          }
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "StageView ${{ github.ref_name }}"
+          releaseBody: "See the assets to download and install this version."
+          releaseDraft: false
+          prerelease: false

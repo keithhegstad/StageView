@@ -1,5 +1,8 @@
 # StageView
 
+**Version:** 1.0.0  
+**Status:** Production Ready ✅
+
 A lightweight, cross-platform multi-camera grid viewer built for professional live streaming and broadcast monitoring. Features intelligent burn-in protection, remote control API, and support for multiple streaming protocols.
 
 <!-- Screenshot will be added in future release -->
@@ -34,20 +37,47 @@ HTTP API for hardware integration (Stream Deck, Elgato, Companion):
 - **Drag-and-Drop** - Reorder cameras in grid mode
 - **Multi-Monitor** - Window position/size persists across sessions
 
+## What's New in v1.0.0
+
+### Production Hardening
+- ✅ **Zero-crash guarantee**: All panic points removed, graceful error handling throughout
+- ✅ **Memory leak fixes**: Proper cleanup of FFmpeg tasks and health monitoring
+- ✅ **Mutex poisoning recovery**: Robust handling of concurrent access errors
+
+### UX Improvements  
+- ✨ **Simplified layouts**: Removed complex custom grid positioning in favor of intuitive auto-grid and PIP
+- ✨ **Stream health stats**: Real-time FPS, bitrate, and uptime monitoring per camera
+- ✨ **Camera presets**: One-click save/load of complete camera configurations
+- ✨ **Drag-and-drop reordering**: Intuitive camera arrangement in grid view
+- ✨ **Multi-monitor support**: Window position and size persistence
+
+### API Enhancements
+- 🔧 **Fullscreen toggle** endpoint for remote control
+- 🔧 **Config reload** endpoint for dynamic configuration updates
+- 🔧 **Enhanced status** endpoint with camera indices for hardware integration
+
 ## Installation
 
 ### Prerequisites
 - **Windows**: Windows 10/11 (64-bit)
-- **macOS**: macOS 10.15+ (Catalina or later)
+- **macOS**: macOS 10.15+ (Catalina or later)  
 - **Linux**: Ubuntu 20.04+, Fedora 35+, or equivalent
 
 ### Download Pre-built Binaries
-1. Visit [Releases](https://github.com/yourusername/stageview/releases)
-2. Download the appropriate installer for your platform:
-   - Windows: `StageView_x.x.x_x64_en-US.msi`
-   - macOS: `StageView_x.x.x_x64.dmg`
-   - Linux: `StageView_x.x.x_amd64.AppImage`
-3. Run the installer
+
+Built installers for Windows are available in `src-tauri/target/release/bundle/`:
+
+**Windows MSI Installer** (Recommended for Enterprise):
+- Location: `src-tauri/target/release/bundle/msi/StageView_1.0.0_x64_en-US.msi`
+- Size: ~38 MB
+- Features: Silent install support, uninstall via Control Panel
+- Install: Double-click or `msiexec /i StageView_1.0.0_x64_en-US.msi /quiet`
+
+**Windows NSIS Installer** (Recommended for End Users):
+- Location: `src-tauri/target/release/bundle/nsis/StageView_1.0.0_x64-setup.exe`  
+- Size: ~28 MB
+- Features: User-friendly wizard, smaller download
+- Install: Double-click and follow prompts
 
 ### Build from Source
 
@@ -58,9 +88,9 @@ HTTP API for hardware integration (Stream Deck, Elgato, Companion):
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-**Node.js** (16+):
+**Node.js** (18+):
 ```bash
-# Use nvm, fnm, or download from nodejs.org
+# Download from nodejs.org or use a version manager (nvm, fnm)
 ```
 
 **FFmpeg** (required for stream decoding):
@@ -77,9 +107,11 @@ npm install
 npm run tauri build
 ```
 
-Built binaries will be in `src-tauri/target/release/bundle/`
+Built installers will be in `src-tauri/target/release/bundle/`
 
 #### 3. Development Mode
+
+For development and testing:
 
 ```bash
 npm run tauri dev
@@ -343,6 +375,27 @@ curl http://192.168.1.100:8090/api/reload
 - Only use on trusted local networks
 - Do NOT expose to internet (no port forwarding)
 
+## Production Reliability
+
+StageView v1.0.0 includes comprehensive hardening for 24/7 operation:
+
+### Error Handling
+- **No Panic Crashes**: All `unwrap()` calls replaced with graceful error handling
+- **Mutex Poisoning Recovery**: Gracefully handles concurrent access errors
+- **Memory Safety**: FFmpeg tasks properly tracked and cleaned up
+
+### Resource Management  
+- **No Memory Leaks**: Health monitoring tasks properly aborted on stream end
+- **Buffer Pool**: Prevents unbounded memory growth during frame processing
+- **Task Cleanup**: All background tasks tracked and terminated correctly
+
+### Stream Reliability
+- **Auto-Reconnection**: Streams reconnect automatically with exponential backoff
+- **Network Failure Recovery**: Handles transient network issues gracefully
+- **Resource Cleanup**: FFmpeg processes terminated cleanly on stream end
+
+See [docs/TESTING.md](docs/TESTING.md) for comprehensive testing checklist.
+
 ## Architecture
 
 ### Data Flow
@@ -377,20 +430,22 @@ Browser Rendering
 
 ```
 StageView/
-├── src/                    # Frontend (vanilla web)
-│   ├── main.js            # App logic (658 lines)
+├── src/                    # Frontend (vanilla JavaScript)
+│   ├── main.js            # Application logic
 │   ├── index.html         # UI structure
 │   └── style.css          # Styling
-├── src-tauri/             # Backend (Rust)
+├── src-tauri/             # Backend (Rust + Tauri 2)
 │   ├── src/
 │   │   ├── main.rs        # Tauri entry point
-│   │   └── lib.rs         # Core app logic (513 lines)
+│   │   └── lib.rs         # Core application logic
 │   ├── binaries/
-│   │   └── ffmpeg.exe     # Bundled FFmpeg
+│   │   └── ffmpeg.exe     # Bundled FFmpeg (Windows)
 │   ├── icons/             # Platform-specific icons
 │   ├── Cargo.toml         # Rust dependencies
 │   └── tauri.conf.json    # Tauri configuration
 ├── docs/                  # Documentation
+│   ├── TESTING.md         # Test checklist
+│   └── plans/             # Design documents
 └── README.md
 ```
 
