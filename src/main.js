@@ -46,6 +46,9 @@ class Mp4StreamReader {
     this._restarting = false; // Guard against concurrent restarts
     this._restartCount = 0; // Restart throttle counter
     this._lastRestartAt = 0; // Timestamp of last restart
+    this._freezeCanvas = null; // Canvas element used to hold last frame during restarts
+    this._lastCorruptedCount = 0; // Track corruptedVideoFrames for glitch detection
+    this._lastGoodFrameAt = 0; // Timestamp of last known-good frame capture
 
     // Bind video event handlers so they can be removed on restart
     this._onVideoError = (e) => {
@@ -101,9 +104,12 @@ class Mp4StreamReader {
           this._restart();
         });
 
-        // Start periodic buffer trimming (every 5s) to prevent memory growth
+        // Start periodic buffer trimming (every 5s) and corrupt-frame monitor
         if (this._trimTimer) clearInterval(this._trimTimer);
-        this._trimTimer = setInterval(() => this._trimBuffer(), 5000);
+        this._trimTimer = setInterval(() => {
+          this._trimBuffer();
+          this._checkCorruptFrames();
+        }, 5000);
       } catch (e) {
         if (this.onError) this.onError('Failed to create SourceBuffer');
       }
@@ -116,6 +122,123 @@ class Mp4StreamReader {
   }
 
   /**
+   * Capture the current video frame onto a canvas overlay so the user
+   * sees the last good frame while the MSE pipeline is being rebuilt.
+   * The canvas is placed inside the same tile parent as the <video>.
+   */
+  _captureFrame() {
+    if (!this.video || this.video.readyState < 2 || this.video.videoWidth === 0) return;
+    try {
+      const tile = this.video.parentElement;
+      if (!tile) return;
+
+      if (!this._freezeCanvas) {
+        this._freezeCanvas = document.createElement('canvas');
+        this._freezeCanvas.className = 'freeze-frame';
+        tile.appendChild(this._freezeCanvas);
+      }
+
+      this._freezeCanvas.width = this.video.videoWidth;
+      this._freezeCanvas.height = this.video.videoHeight;
+      const ctx = this._freezeCanvas.getContext('2d');
+      ctx.drawImage(this.video, 0, 0);
+      this._freezeCanvas.style.display = 'block';
+    } catch (e) {
+      // Canvas draw can fail if video is tainted — ignore silently
+    }
+  }
+
+  /**
+   * Periodically snapshot a known-good frame (every ~10s) so that when
+   * corruption is detected, we have a recent clean frame to show.
+   * Only captures if no corruption has been detected recently.
+   * Cost: one drawImage every 10s per camera — negligible.
+   */
+  _captureGoodFrame() {
+    if (!this.video || this.video.readyState < 2 || this.video.videoWidth === 0) return;
+    const now = Date.now();
+    if (now - this._lastGoodFrameAt < 10000) return; // Max once per 10s
+    try {
+      const tile = this.video.parentElement;
+      if (!tile) return;
+
+      if (!this._freezeCanvas) {
+        this._freezeCanvas = document.createElement('canvas');
+        this._freezeCanvas.className = 'freeze-frame';
+        tile.appendChild(this._freezeCanvas);
+      }
+
+      this._freezeCanvas.width = this.video.videoWidth;
+      this._freezeCanvas.height = this.video.videoHeight;
+      const ctx = this._freezeCanvas.getContext('2d');
+      ctx.drawImage(this.video, 0, 0);
+      // Don't display it — just keep it ready
+      this._lastGoodFrameAt = now;
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Check the browser's video decode quality counters. If corruptedVideoFrames
+   * increases, briefly show the freeze canvas to mask the glitch.
+   * Reads a pre-existing browser counter — costs essentially zero CPU.
+   */
+  _checkCorruptFrames() {
+    if (!this.video || !this._firstFrame) return;
+    const quality = this.video.getVideoPlaybackQuality?.();
+    if (!quality) return;
+
+    const corrupt = quality.corruptedVideoFrames || 0;
+    if (corrupt > this._lastCorruptedCount) {
+      console.warn(`[Mp4StreamReader] ${corrupt - this._lastCorruptedCount} corrupt frame(s) detected for ${this.url}`);
+      // Show freeze canvas briefly to mask visible artifacts
+      if (this._freezeCanvas && this._lastGoodFrameAt > 0) {
+        this._freezeCanvas.style.display = 'block';
+        // Hide after 300ms — just long enough to cover the glitch frames
+        setTimeout(() => {
+          if (this._freezeCanvas) this._freezeCanvas.style.display = 'none';
+        }, 300);
+      }
+    }
+    this._lastCorruptedCount = corrupt;
+
+    // Periodically capture a known-good frame for future use
+    if (corrupt === this._lastCorruptedCount) {
+      this._captureGoodFrame();
+    }
+  }
+
+  /**
+   * Schedule freeze-frame removal: waits for the video to actually
+   * decode and render a frame (timeupdate event) before hiding the
+   * canvas. Falls back to a 5s safety timer to prevent stuck overlays.
+   */
+  _scheduleFreezeRemoval() {
+    if (!this._freezeCanvas || this._freezeCanvas.style.display !== 'block') return;
+    // Already scheduled?
+    if (this._freezeRemovalBound) return;
+
+    this._freezeRemovalBound = () => {
+      this.video.removeEventListener('timeupdate', this._freezeRemovalBound);
+      if (this._freezeSafetyTimer) { clearTimeout(this._freezeSafetyTimer); this._freezeSafetyTimer = null; }
+      this._freezeRemovalBound = null;
+      if (this._freezeCanvas) this._freezeCanvas.style.display = 'none';
+    };
+
+    // timeupdate fires once actual decoded frames are being rendered
+    this.video.addEventListener('timeupdate', this._freezeRemovalBound);
+
+    // Safety: remove after 5s even if timeupdate never fires
+    this._freezeSafetyTimer = setTimeout(() => {
+      if (this._freezeRemovalBound) {
+        this.video.removeEventListener('timeupdate', this._freezeRemovalBound);
+        this._freezeRemovalBound = null;
+      }
+      this._freezeSafetyTimer = null;
+      if (this._freezeCanvas) this._freezeCanvas.style.display = 'none';
+    }, 5000);
+  }
+
+  /**
    * Auto-recover from fatal MSE errors (CHUNK_DEMUXER_ERROR, etc).
    * Tears down the broken MediaSource pipeline and rebuilds it, then
    * reconnects to the HTTP stream. Throttled to prevent tight loops.
@@ -123,6 +246,9 @@ class Mp4StreamReader {
   _restart() {
     if (this._restarting || !this.running) return;
     this._restarting = true;
+
+    // Capture last good frame before tearing down the pipeline
+    this._captureFrame();
 
     // Throttle: max 1 restart per 3 seconds
     const now = Date.now();
@@ -215,6 +341,8 @@ class Mp4StreamReader {
                 this._firstFrame = true;
                 if (firstDataTimer) { clearTimeout(firstDataTimer); firstDataTimer = null; }
                 this.video.play().catch(() => {});
+                // Defer freeze-frame removal until video actually renders
+                this._scheduleFreezeRemoval();
                 if (this.onFirstFrame) this.onFirstFrame();
               }
             }
@@ -307,6 +435,17 @@ class Mp4StreamReader {
     if (this._trimTimer) { clearInterval(this._trimTimer); this._trimTimer = null; }
     this.queue = [];
     this._firstFrame = false;
+
+    // Clean up freeze-frame state
+    if (this._freezeRemovalBound) {
+      this.video.removeEventListener('timeupdate', this._freezeRemovalBound);
+      this._freezeRemovalBound = null;
+    }
+    if (this._freezeSafetyTimer) { clearTimeout(this._freezeSafetyTimer); this._freezeSafetyTimer = null; }
+    if (this._freezeCanvas) {
+      this._freezeCanvas.remove();
+      this._freezeCanvas = null;
+    }
 
     // Remove video event listeners
     this.video.removeEventListener('error', this._onVideoError);

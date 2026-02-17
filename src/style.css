@@ -104,6 +104,20 @@ button {
   display: block;
 }
 
+/* Freeze-frame canvas: holds the last good video frame during MSE
+   pipeline restarts so the user never sees a black flash. */
+.camera-tile .freeze-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+  z-index: 1;
+  pointer-events: none;
+}
+
 .camera-tile .camera-label {
   position: absolute;
   bottom: 0;
