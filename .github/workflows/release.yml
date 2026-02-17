@@ -45,7 +45,6 @@ jobs:
           Write-Host "Extracting..."
           Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 
-          # Find ffmpeg.exe inside the extracted folder
           $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
           if (-not $ffmpegExe) {
             Write-Error "ffmpeg.exe not found in archive"
@@ -56,29 +55,147 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
           Write-Host "FFmpeg placed at $destPath"
 
-      - name: Debug signing key
+      - name: Validate signing key
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
-            Write-Host "TAURI_SIGNING_PRIVATE_KEY is SET (length: $($env:TAURI_SIGNING_PRIVATE_KEY.Length))"
-          } else {
-            Write-Host "::error::TAURI_SIGNING_PRIVATE_KEY is EMPTY or NOT SET"
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Host "::error::TAURI_SIGNING_PRIVATE_KEY is not set"
             exit 1
           }
+          Write-Host "Key length: $($env:TAURI_SIGNING_PRIVATE_KEY.Length)"
+          Write-Host "Password set: $([bool]$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)"
+
+          [System.IO.File]::WriteAllText("$PWD\testfile.txt", "test")
+          npx tauri signer sign "$PWD\testfile.txt" 2>&1
+          if (-not (Test-Path "$PWD\testfile.txt.sig")) {
+            Write-Host "::error::Signing test FAILED - key or password is wrong"
+            exit 1
+          }
+          Write-Host "Signing test PASSED"
+          Remove-Item "$PWD\testfile.txt", "$PWD\testfile.txt.sig" -Force
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "StageView ${{ github.ref_name }}"
-          releaseBody: "See the assets to download and install this version."
-          releaseDraft: false
-          prerelease: false
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+        run: npx tauri build 2>&1
+
+      - name: Prepare release assets
+        id: assets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $bundleDir = "src-tauri/target/release/bundle"
+          $stageDir = "$env:RUNNER_TEMP/release-assets"
+          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+          Write-Host "=== All bundle files ==="
+          Get-ChildItem $bundleDir -Recurse -File | ForEach-Object {
+            Write-Host "  $($_.FullName) ($($_.Length) bytes)"
+          }
+
+          # Find NSIS installer
+          $nsisExe = Get-ChildItem $bundleDir -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $nsisExe) {
+            Write-Host "::error::NSIS installer not found"
+            exit 1
+          }
+          Write-Host "Found NSIS exe: $($nsisExe.FullName)"
+          Copy-Item $nsisExe.FullName "$stageDir/$($nsisExe.Name)"
+
+          # Find MSI
+          $msi = Get-ChildItem $bundleDir -Recurse -Filter "*.msi" | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+          if ($msi) {
+            Write-Host "Found MSI: $($msi.FullName)"
+            Copy-Item $msi.FullName "$stageDir/$($msi.Name)"
+          }
+
+          # Check if tauri build already created .nsis.zip
+          $nsisZip = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+
+          if ($nsisZip) {
+            Write-Host "Tauri build created nsis.zip: $($nsisZip.FullName)"
+            Copy-Item $nsisZip.FullName "$stageDir/$($nsisZip.Name)"
+            $zipName = $nsisZip.Name
+          } else {
+            # Create nsis.zip manually by zipping the installer
+            $zipName = $nsisExe.Name -replace '\.exe$', '.nsis.zip'
+            $zipPath = "$stageDir/$zipName"
+            Write-Host "Creating $zipName manually..."
+            Compress-Archive -Path $nsisExe.FullName -DestinationPath $zipPath -Force
+          }
+
+          $zipFullPath = "$stageDir/$zipName"
+
+          # Check if .sig already exists from tauri build
+          $sigFile = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip.sig" | Select-Object -First 1
+          if ($sigFile) {
+            Write-Host "Sig file exists from build: $($sigFile.FullName)"
+            Copy-Item $sigFile.FullName "$stageDir/$($sigFile.Name)"
+            $signature = (Get-Content $sigFile.FullName -Raw).Trim()
+          } else {
+            # Sign the nsis.zip explicitly
+            Write-Host "Signing $zipName explicitly..."
+            npx tauri signer sign "$zipFullPath" 2>&1
+            $sigPath = "$zipFullPath.sig"
+            if (-not (Test-Path $sigPath)) {
+              Write-Host "::error::Failed to sign $zipName"
+              exit 1
+            }
+            Write-Host "Signed successfully"
+            $signature = (Get-Content $sigPath -Raw).Trim()
+          }
+
+          # Create latest.json
+          $downloadUrl = "https://github.com/keithhegstad/StageView/releases/download/$tag/$zipName"
+          $latestJson = @{
+            version = $version
+            notes = "See the assets to download and install this version."
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = $downloadUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 4
+
+          $latestJsonPath = "$stageDir/latest.json"
+          Set-Content $latestJsonPath $latestJson -Encoding utf8
+          Write-Host "=== latest.json ==="
+          Get-Content $latestJsonPath
+
+          Write-Host "`n=== Staged release files ==="
+          Get-ChildItem $stageDir -File | ForEach-Object {
+            Write-Host "  $($_.Name) ($($_.Length) bytes)"
+          }
+
+          echo "STAGE_DIR=$stageDir" >> $env:GITHUB_OUTPUT
+
+      - name: Create release and upload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $stageDir = "${{ steps.assets.outputs.STAGE_DIR }}"
+
+          # Create release (ignore error if already exists)
+          gh release create $tag --title "StageView $tag" --notes "See the assets to download and install this version." --latest 2>$null
+
+          # Upload all staged files (--clobber overwrites existing)
+          $files = Get-ChildItem $stageDir -File | ForEach-Object { $_.FullName }
+          Write-Host "Uploading $($files.Count) assets to release $tag..."
+          gh release upload $tag $files --clobber
+
+          Write-Host "`nRelease complete!"
+          Write-Host "Release: https://github.com/keithhegstad/StageView/releases/tag/$tag"
+          Write-Host "Updater: https://github.com/keithhegstad/StageView/releases/latest/download/latest.json"
