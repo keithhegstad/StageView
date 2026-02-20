@@ -6,6 +6,11 @@
   box-sizing: border-box;
 }
 
+body.cursor-hidden,
+body.cursor-hidden * {
+  cursor: none !important;
+}
+
 :root {
   --bg: #0a0a0a;
   --surface: #141414;
@@ -63,22 +68,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: grab;
-  transition: opacity 0.2s, transform 0.2s;
-}
-
-.camera-tile:active {
-  cursor: grabbing;
-}
-
-.camera-tile.dragging {
-  opacity: 0.5;
-  transform: scale(0.95);
-}
-
-.camera-tile.drag-over {
-  border: 2px solid #4da6ff;
-  transform: scale(1.05);
+  cursor: default;
 }
 
 .camera-tile canvas {

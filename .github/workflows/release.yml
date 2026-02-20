@@ -87,9 +87,6 @@ jobs:
       - name: Prepare release assets
         id: assets
         shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart("v")
@@ -102,78 +99,66 @@ jobs:
             Write-Host "  $($_.FullName) ($($_.Length) bytes)"
           }
 
-          # Find NSIS installer
+          # ── NSIS installer (user-facing) ────────────────────────────────
           $nsisExe = Get-ChildItem $bundleDir -Recurse -Filter "*-setup.exe" | Select-Object -First 1
-          if (-not $nsisExe) {
-            Write-Host "::error::NSIS installer not found"
-            exit 1
-          }
-          Write-Host "Found NSIS exe: $($nsisExe.FullName)"
+          if (-not $nsisExe) { Write-Host "::error::NSIS installer not found"; exit 1 }
+          Write-Host "Found installer: $($nsisExe.FullName)"
           Copy-Item $nsisExe.FullName "$stageDir/$($nsisExe.Name)"
 
-          # Find MSI
-          $msi = Get-ChildItem $bundleDir -Recurse -Filter "*.msi" | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+          # ── MSI (optional, user-facing) ─────────────────────────────────
+          $msi = Get-ChildItem $bundleDir -Recurse -Filter "*.msi" |
+                 Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
           if ($msi) {
             Write-Host "Found MSI: $($msi.FullName)"
             Copy-Item $msi.FullName "$stageDir/$($msi.Name)"
           }
 
-          # Check if tauri build already created .nsis.zip
-          $nsisZip = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+          # ── Update zip produced by createUpdaterArtifacts ───────────────
+          # Tauri names it like StageView_1.0.5_x64-setup.nsis.zip.
+          # Rename to StageView_VERSION_x64-update.zip so it's clearly
+          # distinct from the installer and has a stable pattern.
+          $nsisZip = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip" |
+                     Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+          if (-not $nsisZip) { Write-Host "::error::.nsis.zip update artifact not found — ensure createUpdaterArtifacts is enabled in tauri.conf.json"; exit 1 }
 
-          if ($nsisZip) {
-            Write-Host "Tauri build created nsis.zip: $($nsisZip.FullName)"
-            Copy-Item $nsisZip.FullName "$stageDir/$($nsisZip.Name)"
-            $zipName = $nsisZip.Name
-          } else {
-            # Create nsis.zip manually by zipping the installer
-            $zipName = $nsisExe.Name -replace '\.exe$', '.nsis.zip'
-            $zipPath = "$stageDir/$zipName"
-            Write-Host "Creating $zipName manually..."
-            Compress-Archive -Path $nsisExe.FullName -DestinationPath $zipPath -Force
-          }
+          # Named _autoupdate so users clearly know not to install it manually.
+          # The .sig is NOT uploaded as a release asset — its value is embedded
+          # in latest.json, which is the only place the updater reads it from.
+          $updateZipName = "update.zip"
+          $updateZipPath = "$stageDir/$updateZipName"
+          Copy-Item $nsisZip.FullName $updateZipPath
+          Write-Host "Update zip → $updateZipName"
 
-          $zipFullPath = "$stageDir/$zipName"
-
-          # Check if .sig already exists from tauri build
+          # ── Signature (embedded in latest.json only, not uploaded) ───────
           $sigFile = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip.sig" | Select-Object -First 1
-          if ($sigFile) {
-            Write-Host "Sig file exists from build: $($sigFile.FullName)"
-            Copy-Item $sigFile.FullName "$stageDir/$($sigFile.Name)"
-            $signature = (Get-Content $sigFile.FullName -Raw).Trim()
-          } else {
-            # Sign the nsis.zip explicitly
-            Write-Host "Signing $zipName explicitly..."
-            npx tauri signer sign "$zipFullPath" 2>&1
-            $sigPath = "$zipFullPath.sig"
-            if (-not (Test-Path $sigPath)) {
-              Write-Host "::error::Failed to sign $zipName"
-              exit 1
-            }
-            Write-Host "Signed successfully"
-            $signature = (Get-Content $sigPath -Raw).Trim()
-          }
+          if (-not $sigFile) { Write-Host "::error::.nsis.zip.sig not found — check TAURI_SIGNING_PRIVATE_KEY is set"; exit 1 }
 
-          # Create latest.json
-          $downloadUrl = "https://github.com/keithhegstad/StageView/releases/download/$tag/$zipName"
+          $signature = (Get-Content $sigFile.FullName -Raw).Trim()
+          Write-Host "Signature read (will be embedded in latest.json only)"
+
+          # ── latest.json ─────────────────────────────────────────────────
+          $downloadUrl = "https://github.com/keithhegstad/StageView/releases/download/$tag/$updateZipName"
           $latestJson = @{
-            version = $version
-            notes = "See the assets to download and install this version."
+            version  = $version
+            notes    = "See the assets to download and install this version."
             pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = @{
               "windows-x86_64" = @{
                 signature = $signature
-                url = $downloadUrl
+                url       = $downloadUrl
               }
             }
           } | ConvertTo-Json -Depth 4
 
           $latestJsonPath = "$stageDir/latest.json"
           Set-Content $latestJsonPath $latestJson -Encoding utf8
+
+          Write-Host ""
           Write-Host "=== latest.json ==="
           Get-Content $latestJsonPath
 
-          Write-Host "`n=== Staged release files ==="
+          Write-Host ""
+          Write-Host "=== Staged release files ==="
           Get-ChildItem $stageDir -File | ForEach-Object {
             Write-Host "  $($_.Name) ($($_.Length) bytes)"
           }

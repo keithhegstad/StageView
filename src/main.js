@@ -484,8 +484,6 @@ class StageView {
     this.soloIndex = null; // null = grid view, number = 1-based solo index
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
-    this.draggedTile = null;
-    this.dragStartIndex = null;
     this.previousHealthValues = new Map(); // stores previous health values for change detection
     this.healthStats = new Map(); // camera_id -> health object
     this._healthDisplayTimer = null; // debounce timer for updateHealthDisplay
@@ -737,16 +735,6 @@ class StageView {
         }
       });
 
-      // Add drag-and-drop
-      const camId = tile.dataset.id;
-      const cameraIndex = this.cameras.findIndex((c) => c.id === camId);
-
-      tile.draggable = true;
-      tile.addEventListener("dragstart", (e) => this.handleDragStart(e, cameraIndex));
-      tile.addEventListener("dragover", (e) => this.handleDragOver(e));
-      tile.addEventListener("dragleave", (e) => e.currentTarget.classList.remove("drag-over"));
-      tile.addEventListener("drop", (e) => this.handleDrop(e, cameraIndex));
-      tile.addEventListener("dragend", (e) => this.handleDragEnd(e));
     });
   }
 
@@ -1683,52 +1671,6 @@ class StageView {
     }
   }
 
-  // ── Drag-and-Drop Reordering ───────────────────────────────────────────
-
-  handleDragStart(e, index) {
-    this.draggedTile = e.currentTarget;
-    this.dragStartIndex = index;
-    e.currentTarget.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-  }
-
-  handleDragOver(e) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    const target = e.currentTarget;
-    if (target !== this.draggedTile) {
-      target.classList.add("drag-over");
-    }
-  }
-
-  handleDrop(e, targetIndex) {
-    e.preventDefault();
-    e.stopPropagation();
-    e.currentTarget.classList.remove("drag-over");
-
-    if (this.dragStartIndex !== targetIndex) {
-      const temp = this.cameras[this.dragStartIndex];
-      this.cameras[this.dragStartIndex] = this.cameras[targetIndex];
-      this.cameras[targetIndex] = temp;
-      this.displayOrder = this.cameras.map((_, i) => i); // resync display order after manual reorder
-      this.render();
-      this.saveCameraOrder().catch(err => {
-        this.showToast("Failed to save camera order", 'error');
-      });
-    }
-  }
-
-  handleDragEnd(e) {
-    e.currentTarget.classList.remove("dragging");
-    document.querySelectorAll(".camera-tile").forEach(t => t.classList.remove("drag-over"));
-  }
-
-  async saveCameraOrder() {
-    const config = await invoke("get_config");
-    config.cameras = this.cameras;
-    await invoke("save_config", { config });
-  }
-
   // ── Serialized Config Save ──────────────────────────────────────────────
 
   /**
@@ -1805,23 +1747,16 @@ class StageView {
     const showUI = () => {
       this._isIdle = false;
       toolbar.classList.add('visible');
-      document.body.style.cursor = '';
+      document.body.classList.remove('cursor-hidden');
 
       clearTimeout(this._idleTimer);
       this._idleTimer = setTimeout(hideUI, IDLE_TIMEOUT);
     };
 
-    const hideUI = async () => {
+    const hideUI = () => {
       this._isIdle = true;
       toolbar.classList.remove('visible');
-
-      // Hide cursor only in fullscreen
-      try {
-        const win = getCurrentWindow();
-        if (await win.isFullscreen()) {
-          document.body.style.cursor = 'none';
-        }
-      } catch (_) {}
+      document.body.classList.add('cursor-hidden');
     };
 
     document.addEventListener('mousemove', showUI);
