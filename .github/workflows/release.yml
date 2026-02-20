@@ -39,126 +39,27 @@ jobs:
           $extractPath = "$env:RUNNER_TEMP\ffmpeg"
           $destPath = "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
 
-          Write-Host "Downloading FFmpeg 8.0.1..."
           Invoke-WebRequest -Uri $ffmpegUrl -OutFile $zipPath -UseBasicParsing
-
-          Write-Host "Extracting..."
           Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 
           $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-          if (-not $ffmpegExe) {
-            Write-Error "ffmpeg.exe not found in archive"
-            exit 1
-          }
+          if (-not $ffmpegExe) { Write-Error "ffmpeg.exe not found in archive"; exit 1 }
 
           New-Item -ItemType Directory -Path "src-tauri/binaries" -Force | Out-Null
           Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
           Write-Host "FFmpeg placed at $destPath"
 
-      - name: Build Tauri app
-        shell: pwsh
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build 2>&1
-
-      - name: Prepare release assets
-        id: assets
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart("v")
-          $bundleDir = "src-tauri/target/release/bundle"
-          $stageDir = "$env:RUNNER_TEMP/release-assets"
-          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
-
-          Write-Host "=== All bundle files ==="
-          Get-ChildItem $bundleDir -Recurse -File | ForEach-Object {
-            Write-Host "  $($_.FullName) ($($_.Length) bytes)"
-          }
-
-          # ── NSIS installer (user-facing) ────────────────────────────────
-          $nsisExe = Get-ChildItem $bundleDir -Recurse -Filter "*-setup.exe" | Select-Object -First 1
-          if (-not $nsisExe) { Write-Host "::error::NSIS installer not found"; exit 1 }
-          Write-Host "Found installer: $($nsisExe.FullName)"
-          Copy-Item $nsisExe.FullName "$stageDir/$($nsisExe.Name)"
-
-          # ── MSI (optional, user-facing) ─────────────────────────────────
-          $msi = Get-ChildItem $bundleDir -Recurse -Filter "*.msi" |
-                 Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
-          if ($msi) {
-            Write-Host "Found MSI: $($msi.FullName)"
-            Copy-Item $msi.FullName "$stageDir/$($msi.Name)"
-          }
-
-          # ── Update zip produced by createUpdaterArtifacts ───────────────
-          # Tauri names it like StageView_1.0.5_x64-setup.nsis.zip.
-          # Rename to StageView_VERSION_x64-update.zip so it's clearly
-          # distinct from the installer and has a stable pattern.
-          $nsisZip = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip" |
-                     Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
-          if (-not $nsisZip) { Write-Host "::error::.nsis.zip update artifact not found — ensure createUpdaterArtifacts is enabled in tauri.conf.json"; exit 1 }
-
-          # Named _autoupdate so users clearly know not to install it manually.
-          # The .sig is NOT uploaded as a release asset — its value is embedded
-          # in latest.json, which is the only place the updater reads it from.
-          $updateZipName = "update.zip"
-          $updateZipPath = "$stageDir/$updateZipName"
-          Copy-Item $nsisZip.FullName $updateZipPath
-          Write-Host "Update zip → $updateZipName"
-
-          # ── Signature (embedded in latest.json only, not uploaded) ───────
-          $sigFile = Get-ChildItem $bundleDir -Recurse -Filter "*.nsis.zip.sig" | Select-Object -First 1
-          if (-not $sigFile) { Write-Host "::error::.nsis.zip.sig not found — check TAURI_SIGNING_PRIVATE_KEY is set"; exit 1 }
-
-          $signature = (Get-Content $sigFile.FullName -Raw).Trim()
-          Write-Host "Signature read (will be embedded in latest.json only)"
-
-          # ── latest.json ─────────────────────────────────────────────────
-          $downloadUrl = "https://github.com/keithhegstad/StageView/releases/download/$tag/$updateZipName"
-          $latestJson = @{
-            version  = $version
-            notes    = "See the assets to download and install this version."
-            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            platforms = @{
-              "windows-x86_64" = @{
-                signature = $signature
-                url       = $downloadUrl
-              }
-            }
-          } | ConvertTo-Json -Depth 4
-
-          $latestJsonPath = "$stageDir/latest.json"
-          Set-Content $latestJsonPath $latestJson -Encoding utf8
-
-          Write-Host ""
-          Write-Host "=== latest.json ==="
-          Get-Content $latestJsonPath
-
-          Write-Host ""
-          Write-Host "=== Staged release files ==="
-          Get-ChildItem $stageDir -File | ForEach-Object {
-            Write-Host "  $($_.Name) ($($_.Length) bytes)"
-          }
-
-          echo "STAGE_DIR=$stageDir" >> $env:GITHUB_OUTPUT
-
-      - name: Create release and upload
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $stageDir = "${{ steps.assets.outputs.STAGE_DIR }}"
-
-          # Create release (ignore error if already exists)
-          gh release create $tag --title "StageView $tag" --notes "See the assets to download and install this version." --latest 2>$null
-
-          # Upload all staged files (--clobber overwrites existing)
-          $files = Get-ChildItem $stageDir -File | ForEach-Object { $_.FullName }
-          Write-Host "Uploading $($files.Count) assets to release $tag..."
-          gh release upload $tag $files --clobber
-
-          Write-Host "`nRelease complete!"
-          Write-Host "Release: https://github.com/keithhegstad/StageView/releases/tag/$tag"
-          Write-Host "Updater: https://github.com/keithhegstad/StageView/releases/latest/download/latest.json"
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: StageView ${{ github.ref_name }}
+          releaseBody: See the assets to download and install this version.
+          releaseDraft: false
+          prerelease: false
+          updaterJsonFileName: latest.json
+          updaterJsonPreferNsis: true
