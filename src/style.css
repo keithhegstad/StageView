@@ -766,6 +766,20 @@ button {
   transition: border-color var(--transition);
 }
 
+#api-port {
+  width: 80px;
+}
+
+.interval-input input[type=number]::-webkit-inner-spin-button,
+.interval-input input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.interval-input input[type=number] {
+  -moz-appearance: textfield;
+}
+
 .interval-input input:focus {
   border-color: var(--accent);
 }
@@ -952,99 +966,68 @@ select option {
 }
 
 #health-stats-container {
-  /* Color-coded metrics */
-  --health-fps-color: #5eb3ff;
-  --health-bitrate-color: #a855f7;
-  --health-uptime-color: #10b981;
-
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.75rem;
-  margin-bottom: 1.5rem;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 1rem;
 }
 
-.health-card {
+.health-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
 }
 
-/* Health state indicators on health cards */
-.health-card[data-health-state="online"] {
-  border-left-color: #10b981;
+.health-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #444;
+  transition: background 0.4s, box-shadow 0.4s;
 }
 
-.health-card[data-health-state="warn"] {
-  border-left-color: #f59e0b;
+.health-row[data-health-state="online"] .health-dot {
+  background: #10b981;
+  box-shadow: 0 0 6px #10b98155;
 }
 
-.health-card[data-health-state="error"] {
-  border-left-color: #ef4444;
+.health-row[data-health-state="warn"] .health-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px #f59e0b55;
 }
 
-.health-camera-name {
-  font-weight: 600;
+.health-row[data-health-state="error"] .health-dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef444455;
+}
+
+.health-row-name {
+  font-size: 0.875rem;
+  font-weight: 500;
   color: var(--text);
-  font-size: 0.95rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.health-metrics {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 0.5rem;
-  font-size: 0.85rem;
+.health-row-stats {
+  font-size: 0.75rem;
+  color: #666;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color 0.4s;
 }
 
-.health-metric {
-  display: flex;
-  flex-direction: column;
-  font-size: 0.85rem;
-}
-
-.health-label {
-  color: #999;
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.health-value {
-  color: #fff;
-  font-weight: 700;
-  font-size: 1rem;
-  margin-top: 0.2rem;
-}
-
-/* Color-coded metric values */
-.health-metric:nth-child(1) .health-value {
-  color: var(--health-fps-color);
-}
-
-.health-metric:nth-child(2) .health-value {
-  color: var(--health-bitrate-color);
-}
-
-.health-metric:nth-child(3) .health-value {
-  color: var(--health-uptime-color);
-}
-
-.health-metric:nth-child(4) .health-value {
-  color: #fbbf24; /* Yellow for resolution */
-}
-
-.health-metric:nth-child(5) .health-value {
-  color: #8b5cf6; /* Purple for quality */
-}
-
-.health-metric:nth-child(6) .health-value {
-  color: #ec4899; /* Pink for codec */
-}
+.health-row[data-health-state="online"] .health-row-stats { color: #888; }
+.health-row[data-health-state="warn"]   .health-row-stats { color: #b07000; }
+.health-row[data-health-state="error"]  .health-row-stats { color: #a03030; }
 
 /* ── Shared Button Styles ─────────────────────────────────────────────────── */
 

@@ -462,10 +462,6 @@ class Mp4StreamReader {
       // Ignore cleanup errors
     }
   }
-
-  draw() {
-    // MSE handles rendering automatically, no manual draw needed
-  }
 }
 
 class StageView {
@@ -484,10 +480,7 @@ class StageView {
     this.soloIndex = null; // null = grid view, number = 1-based solo index
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
-    this.previousHealthValues = new Map(); // stores previous health values for change detection
     this.healthStats = new Map(); // camera_id -> health object
-    this._healthDisplayTimer = null; // debounce timer for updateHealthDisplay
-    this._healthStateCounters = new Map(); // hysteresis counters for health state transitions
     this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
     this._configSavePromise = null; // serializes config save operations
     this.streamReaders = new Map(); // camera_id -> Mp4StreamReader
@@ -518,9 +511,11 @@ class StageView {
         this.cameraStatuses.set(camera_id, status);
 
         const tile = document.querySelector(`[data-id="${camera_id}"]`);
-        if (!tile) return;
+        if (tile) this.applyCameraStatus(tile, status);
 
-        this.applyCameraStatus(tile, status);
+        // Live-update health dot if settings panel is open
+        const row = document.querySelector(`#health-stats-container [data-camera-id="${camera_id}"]`);
+        if (row) row.setAttribute('data-health-state', this._healthStateFromStatus(status));
       });
 
       // Listen for remote commands from the API server
@@ -533,11 +528,14 @@ class StageView {
         }
       });
 
-      // Listen for stream health updates
+      // Listen for stream health updates — update fps display directly, no debounce
       this.unlistenHealth = await listen("stream-health", (event) => {
         const { camera_id, health } = event.payload;
         this.healthStats.set(camera_id, health);
-        this._scheduleHealthUpdate();
+        const row = document.querySelector(`#health-stats-container [data-camera-id="${camera_id}"]`);
+        if (!row) return;
+        const fpsEl = row.querySelector('[data-metric="fps"]');
+        if (fpsEl) fpsEl.textContent = health.fps > 0 ? health.fps.toFixed(1) : '--';
       });
 
       // Listen for stream errors (deduplicate per camera to prevent toast flood)
@@ -1053,9 +1051,6 @@ class StageView {
         if (e.key !== "Escape") return;
       }
 
-      // TEST: Toggle GPU scaling (Press 'T') — no longer relevant with canvas rendering
-      // Kept for debugging purposes
-
       // Fullscreen toggle
       if (e.key === "F11" || (e.key === "f" && !e.ctrlKey)) {
         e.preventDefault();
@@ -1130,7 +1125,7 @@ class StageView {
     const panel = document.querySelector("#settings .settings-body");
     if (!panel) return;
 
-    // If health section already exists with matching cameras, just update the display
+    // If health section already exists with matching cameras, just refresh values
     const existingHealth = document.getElementById("health-stats-container");
     if (existingHealth) {
       const existingIds = new Set(
@@ -1142,202 +1137,62 @@ class StageView {
         [...currentIds].every(id => existingIds.has(id));
 
       if (sameSet) {
-        // Camera list unchanged — just refresh the values in place
-        this.previousHealthValues.clear();
-        this._healthStateCounters.clear();
-        this._scheduleHealthUpdate();
+        this.refreshHealthStats();
         return;
       }
-      // Camera list changed — tear down and rebuild; clear stale cache
-      this.previousHealthValues.clear();
-      this._healthStateCounters.clear();
       existingHealth.closest(".settings-section")?.remove();
     }
 
-    // Create health section HTML
-    let healthHTML = `
+    // Create health section HTML — dot + name + fps only
+    const healthHTML = `
       <div class="settings-section">
         <h3>Stream Health</h3>
         <div id="health-stats-container">
           ${this.cameras.map(cam => `
-            <div class="health-card" data-camera-id="${cam.id}" data-health-state="unknown">
-              <div class="health-camera-name">${escapeHtml(cam.name)}</div>
-              <div class="health-metrics">
-                <div class="health-metric">
-                  <span class="health-label">FPS:</span>
-                  <span class="health-value" data-metric="fps">--</span>
-                </div>
-                <div class="health-metric">
-                  <span class="health-label">Bitrate:</span>
-                  <span class="health-value" data-metric="bitrate">--</span>
-                </div>
-                <div class="health-metric">
-                  <span class="health-label">Uptime:</span>
-                  <span class="health-value" data-metric="uptime">--</span>
-                </div>
-                <div class="health-metric">
-                  <span class="health-label">Resolution:</span>
-                  <span class="health-value" data-metric="resolution">--</span>
-                </div>
-                <div class="health-metric">
-                  <span class="health-label">Codec:</span>
-                  <span class="health-value" data-metric="codec">--</span>
-                </div>
-              </div>
+            <div class="health-row" data-camera-id="${cam.id}" data-health-state="unknown">
+              <span class="health-dot"></span>
+              <span class="health-row-name">${escapeHtml(cam.name)}</span>
+              <span class="health-row-stats"><span data-metric="fps">--</span> fps</span>
             </div>
           `).join('')}
         </div>
       </div>
     `;
 
-    // Insert health section at the top of settings panel
     panel.insertAdjacentHTML('afterbegin', healthHTML);
-
-    // Clear cached previous values so all fields repopulate from scratch
-    this.previousHealthValues.clear();
-
-    // Fetch current health stats from backend and update display
     this.refreshHealthStats();
   }
 
   async refreshHealthStats() {
-    try {
-      const healthMap = await invoke("get_stream_health");
-      this.healthStats.clear();
-      for (const [cameraId, health] of Object.entries(healthMap)) {
-        this.healthStats.set(cameraId, health);
-      }
-      this._scheduleHealthUpdate();
-    } catch (err) {
-      console.error("Failed to fetch stream health:", err);
-      this._scheduleHealthUpdate();
-    }
+    // healthStats is kept current by the stream-health event listener.
+    // Just repaint from what we already have in memory — no Rust invocation needed.
+    // If no events have fired yet (stream just started), shows '--' until the
+    // next 2-second health tick arrives.
+    this.updateHealthDisplay();
   }
 
-  _scheduleHealthUpdate() {
-    if (this._healthDisplayTimer !== null) return;
-    this._healthDisplayTimer = setTimeout(() => {
-      this._healthDisplayTimer = null;
-      this.updateHealthDisplay();
-    }, 1000);
+  // Map camera-status strings to health dot states
+  _healthStateFromStatus(status) {
+    if (status === 'online')                          return 'online';
+    if (status === 'offline' || status === 'error')   return 'error';
+    if (status)                                       return 'warn';
+    return 'unknown';
   }
 
   updateHealthDisplay() {
     const container = document.getElementById("health-stats-container");
-    if (!container) return; // Settings panel not open
+    if (!container) return;
 
-    // Clean up stale camera data from previousHealthValues
-    const currentCameraIds = new Set(this.healthStats.keys());
-    for (const cameraId of this.previousHealthValues.keys()) {
-      if (!currentCameraIds.has(cameraId)) {
-        this.previousHealthValues.delete(cameraId);
-      }
-    }
-    for (const cameraId of this._healthStateCounters.keys()) {
-      if (!currentCameraIds.has(cameraId)) {
-        this._healthStateCounters.delete(cameraId);
-      }
-    }
+    container.querySelectorAll('[data-camera-id]').forEach(row => {
+      const cameraId = row.dataset.cameraId;
 
-    this.healthStats.forEach((health, cameraId) => {
-      const card = container.querySelector(`[data-camera-id="${cameraId}"]`);
-      if (!card) return;
+      // Dot color driven directly from live camera status (reliable, already maintained)
+      row.setAttribute('data-health-state', this._healthStateFromStatus(this.cameraStatuses.get(cameraId) || ''));
 
-      const fpsEl = card.querySelector('[data-metric="fps"]');
-      const bitrateEl = card.querySelector('[data-metric="bitrate"]');
-      const uptimeEl = card.querySelector('[data-metric="uptime"]');
-      const resolutionEl = card.querySelector('[data-metric="resolution"]');
-      const codecEl = card.querySelector('[data-metric="codec"]');
-
-      // Get previous values for this camera
-      const prevValues = this.previousHealthValues.get(cameraId) || {};
-
-      // Update FPS
-      const fpsValue = (health.fps ?? 0).toFixed(1);
-      if (fpsEl && prevValues.fps !== fpsValue) {
-        fpsEl.textContent = fpsValue;
-      }
-
-      // Update Bitrate with Mbps conversion and hysteresis
-      const bitrateKbps = health.bitrate_kbps ?? 0;
-      const prevUsedMbps = prevValues.bitrateUnit === 'Mbps';
-      const useMbps = prevUsedMbps
-        ? bitrateKbps >= 900   // stay in Mbps until below 900
-        : bitrateKbps > 1000;  // switch to Mbps above 1000
-      let bitrateText;
-      if (useMbps) {
-        const bitrateMbps = Math.round(bitrateKbps / 10) / 100;
-        bitrateText = `${bitrateMbps.toFixed(2)} Mbps`;
-      } else {
-        bitrateText = `${bitrateKbps.toFixed(0)} kbps`;
-      }
-      if (bitrateEl && prevValues.bitrate !== bitrateText) {
-        bitrateEl.textContent = bitrateText;
-      }
-
-      // Update Uptime with simplified format (hours and minutes only)
-      const uptime_secs = health.uptime_secs ?? 0;
-      const hours = Math.floor(uptime_secs / 3600);
-      const mins = Math.floor((uptime_secs % 3600) / 60);
-      let uptimeText;
-      if (hours > 0) {
-        uptimeText = `${hours}h ${mins}m`;
-      } else if (mins > 0) {
-        uptimeText = `${mins}m`;
-      } else {
-        uptimeText = `${uptime_secs}s`;
-      }
-      if (uptimeEl && prevValues.uptime !== uptimeText) {
-        uptimeEl.textContent = uptimeText;
-      }
-
-      // Update Resolution
-      const resolutionText = health.resolution || "Unknown";
-      if (resolutionEl && prevValues.resolution !== resolutionText) {
-        resolutionEl.textContent = resolutionText;
-      }
-
-      // Update Codec
-      const codecText = health.codec || "--";
-      if (codecEl && prevValues.codec !== codecText) {
-        codecEl.textContent = codecText;
-      }
-
-      // Store current values for next comparison
-      this.previousHealthValues.set(cameraId, {
-        fps: fpsValue,
-        bitrate: bitrateText,
-        bitrateUnit: useMbps ? 'Mbps' : 'kbps',
-        uptime: uptimeText,
-        resolution: resolutionText,
-        codec: codecText
-      });
-
-      // Determine health state based on FPS
-      let desiredState;
-      if (health.fps > 0) {
-        desiredState = 'online';
-      } else if (health.uptime_secs > 0) {
-        desiredState = 'warn';
-      } else {
-        desiredState = 'error';
-      }
-
-      // Hysteresis: require 3 consecutive same readings before changing
-      const counter = this._healthStateCounters.get(cameraId) || { state: desiredState, count: 0 };
-      if (counter.state === desiredState) {
-        counter.count++;
-      } else {
-        counter.state = desiredState;
-        counter.count = 1;
-      }
-      this._healthStateCounters.set(cameraId, counter);
-
-      const prevState = card.getAttribute('data-health-state');
-      const threshold = prevState === 'unknown' ? 1 : 3;
-      if (counter.count >= threshold && prevState !== desiredState) {
-        card.setAttribute('data-health-state', desiredState);
-      }
+      // FPS from last health event
+      const health = this.healthStats.get(cameraId);
+      const fpsEl = row.querySelector('[data-metric="fps"]');
+      if (fpsEl) fpsEl.textContent = (health && health.fps > 0) ? health.fps.toFixed(1) : '--';
     });
   }
 

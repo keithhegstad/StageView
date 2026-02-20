@@ -135,21 +135,26 @@
             <input type="number" id="api-port" min="1024" max="65535" value="8090" />
           </div>
         </label>
-        <p class="hint">HTTP API for Stream Deck / Companion control (requires restart)</p>
+        <p class="hint">HTTP API and browser control panel (requires restart to change port)</p>
         <div class="api-endpoints">
           <p class="hint" style="margin-top:12px;font-family:monospace">
-            GET /api/solo/1 — solo camera 1<br>
-            GET /api/solo/2 — solo camera 2<br>
-            GET /api/grid — return to grid<br>
-            GET /api/status — list cameras<br>
-            GET /api/fullscreen - fullscreen toggle
+            GET / &mdash; control panel (open in any browser)<br>
+            GET /api/solo/1 &mdash; solo camera 1<br>
+            GET /api/solo/2 &mdash; solo camera 2<br>
+            GET /api/grid &mdash; return to grid<br>
+            GET /api/status &mdash; list cameras<br>
+            GET /api/fullscreen &mdash; fullscreen toggle<br>
+            GET /api/reload &mdash; reload config from disk
+          </p>
+          <p class="hint" style="margin-top:8px">
+            Control panel: <strong>http://stageview.local:8090/</strong>
           </p>
         </div>
       </section>
 
       <!-- Updates -->
       <section>
-        <h3>Updates</h3>
+        <h3>Version</h3>
         <div class="update-row">
           <span id="current-version">v1.0.0</span>
           <button class="check-update-btn" id="check-update-btn">Check for Updates</button>
@@ -176,33 +181,6 @@
           <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span class="update-version-new" id="update-new-ver"></span>
-      </div>
-      <div class="update-changelog" id="update-changelog"></div>
-      <div class="update-progress hidden" id="update-progress">
-        <div class="update-progress-bar">
-          <div class="update-progress-fill" id="update-progress-fill"></div>
-        </div>
-        <span class="update-progress-text" id="update-progress-text">Downloading...</span>
-      </div>
-    </div>
-    <div class="update-modal-footer" id="update-footer">
-      <button class="update-later-btn" id="update-later-btn">Later</button>
-      <button class="update-now-btn" id="update-now-btn">Update Now</button>
-    </div>
-  </div>
-
-  <!-- Update Modal -->
-  <div id="update-overlay" class="hidden"></div>
-  <div id="update-modal" class="hidden">
-    <div class="update-modal-header">
-      <h2>Update Available</h2>
-      <button class="close-btn" id="update-close-btn">&#10005;</button>
-    </div>
-    <div class="update-modal-body">
-      <div class="update-version-info">
-        <span class="update-version-current" id="update-current-ver">v1.0.0</span>
-        <span class="update-arrow">&#10132;</span>
-        <span class="update-version-new" id="update-new-ver">v1.1.0</span>
       </div>
       <div class="update-changelog" id="update-changelog"></div>
       <div class="update-progress hidden" id="update-progress">

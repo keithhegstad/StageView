@@ -1,6 +1,6 @@
 [package]
 name = "stageview"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Lightweight multi-camera grid viewer with burn-in protection"
 
