@@ -55,28 +55,6 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
           Write-Host "FFmpeg placed at $destPath"
 
-      - name: Validate signing key
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-            Write-Host "::error::TAURI_SIGNING_PRIVATE_KEY is not set"
-            exit 1
-          }
-          Write-Host "Key length: $($env:TAURI_SIGNING_PRIVATE_KEY.Length)"
-          Write-Host "Password set: $([bool]$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)"
-
-          [System.IO.File]::WriteAllText("$PWD\testfile.txt", "test")
-          npx tauri signer sign "$PWD\testfile.txt" 2>&1
-          if (-not (Test-Path "$PWD\testfile.txt.sig")) {
-            Write-Host "::error::Signing test FAILED - key or password is wrong"
-            exit 1
-          }
-          Write-Host "Signing test PASSED"
-          Remove-Item "$PWD\testfile.txt", "$PWD\testfile.txt.sig" -Force
-
       - name: Build Tauri app
         shell: pwsh
         env:
