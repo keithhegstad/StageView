@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StageView Control Panel</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0e0f11;
+      --surface: #17181d;
+      --card: #1f2028;
+      --card-hover: #25262f;
+      --border: #2e2f38;
+      --border-hover: #454659;
+      --accent: #5b8ef0;
+      --accent-hover: #7aa3f5;
+      --accent-dim: rgba(91,142,240,0.15);
+      --green: #3ecf74;
+      --green-dim: rgba(62,207,116,0.12);
+      --orange: #f5a623;
+      --red: #f0646e;
+      --red-dim: rgba(240,100,110,0.12);
+      --purple: #b07df5;
+      --purple-dim: rgba(176,125,245,0.12);
+      --text: #e2e3e8;
+      --text-sub: #a0a1b0;
+      --text-muted: #656680;
+      --radius: 12px;
+      --radius-sm: 7px;
+      --shadow: 0 2px 16px rgba(0,0,0,0.5);
+    }
+
+    html, body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .app { min-height: 100vh; display: flex; flex-direction: column; }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 28px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, #4f7de0 0%, #7c5bf0 100%);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 800; color: white;
+      flex-shrink: 0;
+      box-shadow: 0 2px 8px rgba(91,91,240,0.4);
+      letter-spacing: -1px;
+    }
+
+    .header-title { font-size: 15px; font-weight: 700; }
+    .header-badges { display: flex; gap: 8px; margin-left: 6px; }
+    .badge {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid rgba(91,142,240,0.3);
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      letter-spacing: 0.04em;
+    }
+
+    main {
+      flex: 1;
+      padding: 28px 24px;
+      max-width: 1120px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* ── Section headers ────────────────────────────────────────────────── */
+    .section-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .section-extra { display: flex; gap: 6px; align-items: center; }
+
+    /* ── PC Cards ───────────────────────────────────────────────────────── */
+    .pc-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 22px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+      transition: border-color 0.2s;
+    }
+    .pc-card:hover { border-color: var(--border-hover); }
+    .pc-card.this-pc { border-left: 3px solid var(--accent); }
+    .pc-card.is-error { border-left: 3px solid var(--red); }
+
+    .pc-top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .pc-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .pc-status-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .pc-status-dot.online  { background: var(--green); box-shadow: 0 0 7px var(--green); }
+    .pc-status-dot.offline { background: var(--red); }
+    .pc-status-dot.loading { background: var(--orange); animation: dotpulse 1.1s ease-in-out infinite; }
+
+    @keyframes dotpulse {
+      0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(245,166,35,0.6); }
+      50%      { opacity: 0.5; box-shadow: 0 0 0 4px rgba(245,166,35,0); }
+    }
+
+    .pc-name-block { min-width: 0; }
+    .pc-display-name {
+      font-size: 15px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pc-host-label {
+      font-size: 11px; color: var(--text-muted);
+      font-family: 'SF Mono', 'Consolas', monospace;
+      margin-top: 1px;
+    }
+    .pc-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    /* ── Control Groups ─────────────────────────────────────────────────── */
+    .control-group { margin-bottom: 12px; }
+    .group-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .group-label::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .btn-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.14s, border-color 0.14s, transform 0.1s;
+      white-space: nowrap;
+      user-select: none;
+      line-height: 1.3;
+    }
+    .btn:hover:not(:disabled)  { background: var(--card-hover); border-color: var(--border-hover); }
+    .btn:active:not(:disabled) { transform: scale(0.96); }
+    .btn:disabled              { opacity: 0.38; cursor: not-allowed; }
+
+    .btn.primary {
+      background: var(--accent); border-color: var(--accent); color: white;
+    }
+    .btn.primary:hover:not(:disabled) {
+      background: var(--accent-hover); border-color: var(--accent-hover);
+    }
+
+    /* Grid / Global action buttons */
+    .btn.action {
+      background: var(--card-hover); border-color: var(--border-hover);
+    }
+    .btn.action:hover:not(:disabled) { background: #2d2e3a; border-color: #5a5b70; }
+
+    /* Solo camera buttons */
+    .btn.solo {
+      background: var(--purple-dim);
+      border-color: rgba(176,125,245,0.35);
+      color: var(--purple);
+    }
+    .btn.solo:hover:not(:disabled) { background: rgba(176,125,245,0.2); border-color: var(--purple); }
+    .btn.solo.active {
+      background: var(--purple);
+      border-color: var(--purple);
+      color: white;
+    }
+
+    /* Remove / danger button */
+    .btn.danger {
+      border-color: rgba(240,100,110,0.4);
+      color: var(--red);
+    }
+    .btn.danger:hover:not(:disabled) { background: var(--red-dim); border-color: var(--red); }
+
+    /* Ghost / subtle */
+    .btn.ghost {
+      background: transparent;
+      border-color: transparent;
+      color: var(--text-muted);
+      padding: 5px 10px;
+      font-size: 12px;
+    }
+    .btn.ghost:hover:not(:disabled) { color: var(--text); background: rgba(255,255,255,0.05); }
+
+    .btn-sm { padding: 5px 11px; font-size: 12px; }
+
+    /* Flash animation for feedback */
+    .flash { animation: flash 0.4s ease; }
+    @keyframes flash {
+      0%   { box-shadow: 0 0 0 0 rgba(62,207,116,0.7); }
+      50%  { box-shadow: 0 0 0 6px rgba(62,207,116,0); }
+      100% { box-shadow: none; }
+    }
+
+    /* ── Status message ─────────────────────────────────────────────────── */
+    .status-line {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 14px;
+      min-height: 18px;
+    }
+    .status-line.ok  { color: var(--green); }
+    .status-line.err { color: var(--red); }
+
+    /* ── Add PC Form ────────────────────────────────────────────────────── */
+    .add-form {
+      background: var(--card);
+      border: 1px dashed var(--border-hover);
+      border-radius: var(--radius);
+      padding: 20px 22px;
+      margin-bottom: 16px;
+      display: none;
+    }
+    .add-form.open { display: block; }
+    .add-form-title {
+      font-size: 13px; font-weight: 600; margin-bottom: 14px; color: var(--text-sub);
+    }
+    .fields-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .field { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 130px; }
+    .field label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .field input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 11px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .field input:focus { border-color: var(--accent); }
+    .field input::placeholder { color: var(--text-muted); }
+    .field.port-field { max-width: 90px; }
+    .form-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+    /* ── Empty state ────────────────────────────────────────────────────── */
+    .empty-state {
+      text-align: center;
+      padding: 36px 0;
+      color: var(--text-muted);
+      font-size: 13px;
+      display: none;
+    }
+    .empty-state strong { color: var(--text-sub); }
+
+    /* ── Error state in card ────────────────────────────────────────────── */
+    .conn-error {
+      color: var(--red);
+      font-size: 13px;
+      padding: 4px 0;
+    }
+
+    /* ── Loading placeholder ────────────────────────────────────────────── */
+    .loading-text { color: var(--text-muted); font-size: 13px; }
+
+    /* ── Refresh all btn ─────────────────────────────────────────────────── */
+    .refresh-all-btn { display: flex; align-items: center; gap: 6px; }
+
+    /* ── Responsive ─────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      main { padding: 16px 14px; }
+      .pc-top-row { flex-wrap: wrap; }
+      header { padding: 0 16px; }
+      .header-badges { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">SV</div>
+    <span class="header-title">StageView</span>
+    <div class="header-badges">
+      <span class="badge">Control Panel</span>
+    </div>
+    <div style="flex:1"></div>
+    <button class="btn ghost" onclick="refreshAll()" title="Refresh all PCs">&#8635; Refresh All</button>
+  </header>
+
+  <!-- ── Main ────────────────────────────────────────────────────────────── -->
+  <main>
+
+    <!-- This PC -->
+    <div class="section-row">
+      <span class="section-label">This PC</span>
+    </div>
+    <div id="localCard"></div>
+
+    <!-- Remote PCs -->
+    <div class="section-row" style="margin-top: 32px;">
+      <span class="section-label">Remote PCs</span>
+      <div class="section-extra">
+        <button class="btn ghost btn-sm" onclick="toggleAddForm()">+ Add PC</button>
+      </div>
+    </div>
+
+    <!-- Add PC form -->
+    <div class="add-form" id="addForm">
+      <div class="add-form-title">Add a Remote PC</div>
+      <div class="fields-row">
+        <div class="field">
+          <label>Display Name</label>
+          <input type="text" id="fName" placeholder="Stage Left" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>IP Address or Hostname</label>
+          <input type="text" id="fHost" placeholder="192.168.1.50" autocomplete="off">
+        </div>
+        <div class="field port-field">
+          <label>Port</label>
+          <input type="number" id="fPort" value="8090" min="1" max="65535">
+        </div>
+      </div>
+      <div class="form-btns">
+        <button class="btn ghost" onclick="toggleAddForm()">Cancel</button>
+        <button class="btn primary" onclick="addPc()">Add PC</button>
+      </div>
+    </div>
+
+    <!-- Remote PC cards container -->
+    <div id="remoteCards"></div>
+
+    <div class="empty-state" id="emptyState">
+      No remote PCs added yet.<br>
+      Click <strong>+ Add PC</strong> to control another machine on your network.
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+const LOCAL_HOST = window.location.host;
+let remotePcs = [];
+try { remotePcs = JSON.parse(localStorage.getItem('sv_pcs') || '[]'); } catch(e) {}
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  renderLocalCard();
+  renderRemoteCards();
+});
+
+function savePcs() {
+  localStorage.setItem('sv_pcs', JSON.stringify(remotePcs));
+}
+
+// ── Add / Remove ─────────────────────────────────────────────────────────────
+function toggleAddForm() {
+  const f = document.getElementById('addForm');
+  f.classList.toggle('open');
+  if (f.classList.contains('open')) document.getElementById('fName').focus();
+}
+
+function addPc() {
+  const name = document.getElementById('fName').value.trim();
+  const hostRaw = document.getElementById('fHost').value.trim();
+  const port = parseInt(document.getElementById('fPort').value) || 8090;
+  if (!hostRaw) { document.getElementById('fHost').focus(); return; }
+  const displayName = name || 'Remote PC';
+  const host = hostRaw.includes(':') ? hostRaw : `${hostRaw}:${port}`;
+  remotePcs.push({ id: `pc_${Date.now()}`, name: displayName, host });
+  savePcs();
+  document.getElementById('fName').value = '';
+  document.getElementById('fHost').value = '';
+  document.getElementById('fPort').value = '8090';
+  toggleAddForm();
+  renderRemoteCards();
+}
+
+function removePc(id) {
+  remotePcs = remotePcs.filter(p => p.id !== id);
+  savePcs();
+  renderRemoteCards();
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function renderLocalCard() {
+  const wrap = document.getElementById('localCard');
+  wrap.innerHTML = '';
+  const card = createCard('local', 'This PC', LOCAL_HOST, true);
+  wrap.appendChild(card);
+  loadCard('local', LOCAL_HOST);
+}
+
+function renderRemoteCards() {
+  const wrap = document.getElementById('remoteCards');
+  wrap.innerHTML = '';
+  document.getElementById('emptyState').style.display = remotePcs.length === 0 ? '' : 'none';
+  remotePcs.forEach(pc => {
+    const card = createCard(pc.id, pc.name, pc.host, false);
+    wrap.appendChild(card);
+    loadCard(pc.id, pc.host);
+  });
+}
+
+function refreshAll() {
+  renderLocalCard();
+  renderRemoteCards();
+}
+
+// ── Card DOM builder ─────────────────────────────────────────────────────────
+function createCard(id, name, host, isLocal) {
+  const card = document.createElement('div');
+  card.id = 'card-' + id;
+  card.className = 'pc-card' + (isLocal ? ' this-pc' : '');
+
+  const removeBtn = isLocal ? '' : `
+    <button class="btn btn-sm ghost" title="Refresh" onclick="reloadCard(${esc(JSON.stringify(id))}, ${esc(JSON.stringify(host))})">&#8635;</button>
+    <button class="btn btn-sm danger" onclick="removePc(${esc(JSON.stringify(id))})">Remove</button>
+  `;
+
+  card.innerHTML = `
+    <div class="pc-top-row">
+      <div class="pc-identity">
+        <div class="pc-status-dot loading" id="dot-${id}"></div>
+        <div class="pc-name-block">
+          <div class="pc-display-name">${esc(name)}</div>
+          <div class="pc-host-label">${esc(host)}</div>
+        </div>
+      </div>
+      <div class="pc-card-actions">${removeBtn}</div>
+    </div>
+    <div id="body-${id}"><div class="loading-text">Connecting&hellip;</div></div>
+    <div class="status-line" id="msg-${id}"></div>
+  `;
+  return card;
+}
+
+// ── Load card status from API ─────────────────────────────────────────────────
+async function loadCard(id, host) {
+  const dot  = document.getElementById('dot-'  + id);
+  const body = document.getElementById('body-' + id);
+  const card = document.getElementById('card-' + id);
+
+  dot.className = 'pc-status-dot loading';
+  body.innerHTML = '<div class="loading-text">Connecting&hellip;</div>';
+
+  try {
+    const res = await fetchTimeout(`http://${host}/api/status`, 6000);
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const data = await res.json();
+    const cameras = data.cameras || [];
+
+    dot.className = 'pc-status-dot online';
+    card.classList.remove('is-error');
+    renderCardBody(body, id, host, cameras);
+  } catch (err) {
+    dot.className = 'pc-status-dot offline';
+    card.classList.add('is-error');
+    body.innerHTML = `<div class="conn-error">&#10007; Could not reach ${esc(host)} &mdash; ${esc(err.message)}</div>`;
+  }
+}
+
+function reloadCard(id, host) {
+  loadCard(id, host);
+}
+
+// ── Render card body with controls ───────────────────────────────────────────
+function renderCardBody(container, pcId, host, cameras) {
+  const h  = esc(JSON.stringify(host));  // HTML-escaped JSON — safe in onclick attributes
+  const p  = esc(JSON.stringify(pcId));
+
+  // Global action buttons
+  let html = `
+    <div class="control-group">
+      <div class="group-label">Global Controls</div>
+      <div class="btn-grid">
+        <button class="btn action" onclick="cmd(${h}, ${p}, 'grid')">
+          <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="1" y="1" width="4" height="4" rx="1"/><rect x="7" y="1" width="4" height="4" rx="1"/>
+            <rect x="1" y="7" width="4" height="4" rx="1"/><rect x="7" y="7" width="4" height="4" rx="1"/>
+          </svg>
+          Grid View
+        </button>
+        <button class="btn action" onclick="cmd(${h}, ${p}, 'fullscreen')">
+          <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="1,4 1,1 4,1"/><polyline points="8,1 11,1 11,4"/>
+            <polyline points="1,8 1,11 4,11"/><polyline points="8,11 11,11 11,8"/>
+          </svg>
+          Fullscreen
+        </button>
+        <button class="btn action" onclick="reloadApp(${h}, ${p})">
+          <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M1 6a5 5 0 1 0 1.5-3.5L1 1v3h3"/>
+          </svg>
+          Reload App
+        </button>
+      </div>
+    </div>
+  `;
+
+  // Solo camera buttons
+  if (cameras.length > 0) {
+    const soloBtns = cameras.map(c =>
+      `<button class="btn solo" id="solo-${esc(pcId)}-${c.index}" onclick="solo(${h}, ${p}, ${c.index}, ${esc(JSON.stringify(c.name))})">${esc(c.name)}</button>`
+    ).join('');
+
+    html += `
+      <div class="control-group">
+        <div class="group-label">Solo Camera</div>
+        <div class="btn-grid">${soloBtns}</div>
+      </div>
+    `;
+  }
+
+  container.innerHTML = html;
+}
+
+// ── API Commands ─────────────────────────────────────────────────────────────
+async function cmd(host, pcId, action) {
+  setMsg(pcId, 'Sending\u2026', '');
+  try {
+    const res = await fetchTimeout(`http://${host}/api/${action}`, 5000);
+    const data = await res.json();
+    if (data.ok) {
+      const label = { grid: 'Grid view', fullscreen: 'Fullscreen toggled' }[action] || action;
+      setMsg(pcId, '\u2713 ' + label, 'ok');
+      // Clear any active solo highlight when switching to grid
+      if (action === 'grid') {
+        const card = document.getElementById('card-' + pcId);
+        if (card) card.querySelectorAll('.btn.solo').forEach(b => b.classList.remove('active'));
+      }
+    } else {
+      setMsg(pcId, '\u2717 ' + (data.error || 'Error'), 'err');
+    }
+  } catch (e) {
+    setMsg(pcId, '\u2717 ' + e.message, 'err');
+  }
+}
+
+async function reloadApp(host, pcId) {
+  setMsg(pcId, 'Reloading\u2026', '');
+  try {
+    const res = await fetchTimeout(`http://${host}/api/reload`, 6000);
+    const data = await res.json();
+    if (data.ok) {
+      setMsg(pcId, '\u2713 Reloaded. Refreshing cameras\u2026', 'ok');
+      // Re-fetch camera list after reload settles
+      setTimeout(() => loadCard(pcId, host), 2000);
+    } else {
+      setMsg(pcId, '\u2717 ' + (data.error || 'Error'), 'err');
+    }
+  } catch (e) {
+    setMsg(pcId, '\u2717 ' + e.message, 'err');
+  }
+}
+
+async function solo(host, pcId, idx, name) {
+  setMsg(pcId, `Soloing ${name}\u2026`, '');
+  try {
+    const res = await fetchTimeout(`http://${host}/api/solo/${idx}`, 5000);
+    const data = await res.json();
+    if (data.ok) {
+      setMsg(pcId, `\u2713 Solo: ${name}`, 'ok');
+      // Highlight active button
+      const card = document.getElementById('card-' + pcId);
+      if (card) {
+        card.querySelectorAll('.btn.solo').forEach(b => b.classList.remove('active'));
+        const btn = document.getElementById(`solo-${pcId}-${idx}`);
+        if (btn) { btn.classList.add('active'); flashBtn(btn); }
+      }
+    } else {
+      setMsg(pcId, '\u2717 ' + (data.error || 'Error'), 'err');
+    }
+  } catch (e) {
+    setMsg(pcId, '\u2717 ' + e.message, 'err');
+  }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function setMsg(pcId, text, cls) {
+  const el = document.getElementById('msg-' + pcId);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'status-line' + (cls ? ' ' + cls : '');
+  clearTimeout(el._t);
+  if (cls) el._t = setTimeout(() => { el.textContent = ''; el.className = 'status-line'; }, 4500);
+}
+
+function flashBtn(el) {
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+}
+
+function fetchTimeout(url, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
