@@ -24,7 +24,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "RWQgjtkkbU2rgMC0Oaf5mnDSsigcRgcndrS9CgA4BvJPrIOp9a6mTWDE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE3MUQ0RjE0MUY5NDc0MDgKUldRSWRKUWZGRThkcDJvZ2pPZ01xVWpUS3hwYmhBcnljZUlTRTJpdkc4b005V3djcy9RbWxOQUEK",
       "endpoints": [
         "https://github.com/keithhegstad/StageView/releases/latest/download/latest.json"
       ],
