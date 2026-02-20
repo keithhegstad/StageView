@@ -1,3 +1,4 @@
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -189,12 +190,19 @@ fn stop_streams(state: State<AppState>, app: AppHandle) {
     for (_, handle) in tasks.drain() {
         handle.abort();
     }
-    // Clear stale health data and emit offline status
+    // Clear stale health data, reconnect counters, and stream segment caches.
+    // Cameras removed from config would otherwise leave stale data indefinitely.
     if let Ok(mut health) = state.stream_health.lock() {
         health.clear();
     }
     if let Ok(mut attempts) = state.reconnect_attempts.lock() {
         attempts.clear();
+    }
+    if let Ok(mut init_segs) = state.init_segments.lock() {
+        init_segs.clear();
+    }
+    if let Ok(mut recent_segs) = state.recent_segments.lock() {
+        recent_segs.clear();
     }
     drop(tasks);
     for id in camera_ids {
@@ -212,44 +220,6 @@ fn solo_camera(_state: State<AppState>, _app: AppHandle, camera_id: String) {
     // The broadcast channel's receiver_count check skips sending when no HTTP
     // clients are connected, so background streams have near-zero overhead.
     info!("Solo mode activated: camera {}", camera_id);
-}
-
-#[tauri::command]
-fn grid_view(state: State<AppState>, app: AppHandle) {
-    // Only start streams for cameras that aren't already running.
-    // This avoids killing + restarting the solo'd camera that's still fine.
-    let config = match state.config.lock() {
-        Ok(cfg) => cfg.clone(),
-        Err(_) => {
-            error!("Config mutex poisoned in grid_view");
-            return;
-        }
-    };
-    let ffmpeg_path = state.ffmpeg_path.clone();
-    let mut tasks = match state.stream_tasks.lock() {
-        Ok(t) => t,
-        Err(_) => {
-            error!("stream_tasks mutex poisoned in grid_view");
-            return;
-        }
-    };
-    for camera in &config.cameras {
-        // Skip cameras that already have a running stream
-        if tasks.contains_key(&camera.id) {
-            continue;
-        }
-
-        let cam_id = camera.id.clone();
-        let cam_url = camera.url.clone();
-        let ffmpeg = ffmpeg_path.clone();
-        let app_handle = app.clone();
-
-        let handle = tauri::async_runtime::spawn(async move {
-            stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
-        });
-
-        tasks.insert(camera.id.clone(), handle);
-    }
 }
 
 #[tauri::command]
@@ -342,6 +312,67 @@ fn is_keyframe_fragment(moof_data: &[u8]) -> bool {
         offset += box_size;
     }
     false
+}
+
+/// Count the total number of video samples (frames) declared in all trun boxes
+/// inside a moof box. This gives the exact frame count for the following mdat,
+/// which may contain multiple frames when frag_duration > one frame period.
+fn count_samples_in_moof(moof_data: &[u8]) -> u64 {
+    if moof_data.len() < 8 { return 1; }
+    let mut total: u64 = 0;
+    let mut offset = 8; // skip moof box header
+
+    while offset + 8 <= moof_data.len() {
+        let box_size = u32::from_be_bytes([
+            moof_data[offset], moof_data[offset+1], moof_data[offset+2], moof_data[offset+3]
+        ]) as usize;
+        let box_type = &moof_data[offset+4..offset+8];
+        if box_size < 8 || offset + box_size > moof_data.len() { break; }
+
+        if box_type == b"traf" {
+            let mut traf_off = offset + 8;
+            while traf_off + 8 <= offset + box_size {
+                let child_size = u32::from_be_bytes([
+                    moof_data[traf_off], moof_data[traf_off+1],
+                    moof_data[traf_off+2], moof_data[traf_off+3]
+                ]) as usize;
+                let child_type = &moof_data[traf_off+4..traf_off+8];
+                if child_size < 8 || traf_off + child_size > offset + box_size { break; }
+
+                // trun: version/flags(4) + sample_count(4) starting at offset+8
+                if child_type == b"trun" && child_size >= 16 {
+                    let sample_count = u32::from_be_bytes([
+                        moof_data[traf_off+12], moof_data[traf_off+13],
+                        moof_data[traf_off+14], moof_data[traf_off+15]
+                    ]);
+                    total += sample_count as u64;
+                }
+                traf_off += child_size;
+            }
+        }
+        offset += box_size;
+    }
+    total.max(1) // always count at least 1 to avoid stalling on malformed boxes
+}
+
+/// RAII guard that calls an abort closure when dropped.
+/// Ensures background tasks (health monitoring, stderr capture) are cancelled
+/// even when the parent task is externally aborted via JoinHandle::abort(),
+/// because dropping a Tokio JoinHandle only detaches — it does NOT cancel the task.
+struct AbortOnDrop(Option<Box<dyn FnOnce() + Send + 'static>>);
+
+impl AbortOnDrop {
+    fn new<F: FnOnce() + Send + 'static>(f: F) -> Self {
+        Self(Some(Box::new(f)))
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
 }
 
 /// Calculate smart backoff duration based on attempt number.
@@ -442,6 +473,7 @@ async fn try_stream_camera(
     // Use atomic counters so they can be shared with the health update task
     let frame_count = Arc::new(AtomicU64::new(0));
     let bytes_received = Arc::new(AtomicU64::new(0));
+    let last_frame_at = Arc::new(AtomicU64::new(0)); // Unix ms timestamp of last received frame
 
     info!("Spawning FFmpeg for camera {} ({})", camera_id, url);
 
@@ -584,9 +616,14 @@ async fn try_stream_camera(
     let health_app = app.clone();
     let health_frame_count = frame_count.clone();
     let health_bytes_received = bytes_received.clone();
+    let health_last_frame_at = last_frame_at.clone();
 
-    let health_task = tauri::async_runtime::spawn(async move {
+    // AbortOnDrop ensures this task is cancelled even if try_stream_camera is
+    // externally aborted (e.g. stop_streams), since dropping a JoinHandle only detaches.
+    let health_handle = tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        // Skip = don't fire catch-up ticks when delayed; prevents near-zero tick_elapsed → fps=0
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await; // Skip first immediate tick
 
         // Track previous tick values for rolling delta calculation
@@ -621,10 +658,8 @@ async fn try_stream_camera(
                 fps,
                 bitrate_kbps,
                 frame_count: count,
-                last_frame_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
+                // Only reflects time of actual frame receipt; stays 0 until first frame arrives.
+                last_frame_at: health_last_frame_at.load(Ordering::Relaxed),
                 uptime_secs: uptime,
                 resolution: None,
                 codec: "H264 (copy)".to_string(),
@@ -642,37 +677,41 @@ async fn try_stream_camera(
             });
         }
     });
+    let _health_guard = AbortOnDrop::new(move || health_handle.abort());
 
     let stdout = child.stdout.take().unwrap();
-    // Capture stderr in a background task for diagnostics
+    // Capture stderr in a background task for diagnostics.
+    // AbortOnDrop ensures the task is cleaned up on any exit path.
     let stderr_camera_id = camera_id.to_string();
-    let stderr_task = if let Some(stderr) = child.stderr.take() {
-        Some(tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let reader = tokio::io::BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Demote normal H.264 startup noise to debug level.
-                // "non-existing PPS/SPS" and "no frame" are expected when
-                // joining an RTP stream mid-GOP before the first keyframe.
-                if line.contains("non-existing PPS") || line.contains("non-existing SPS")
-                    || line.contains("no frame") || line.contains("Last message repeated")
-                {
-                    debug!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
-                } else {
-                    warn!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
-                }
+    let _stderr_guard = child.stderr.take().map(|stderr| {
+        let h = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let reader = tokio::io::BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // Demote normal H.264 startup noise to debug level.
+            // "non-existing PPS/SPS" and "no frame" are expected when
+            // joining an RTP stream mid-GOP before the first keyframe.
+            if line.contains("non-existing PPS") || line.contains("non-existing SPS")
+                || line.contains("no frame") || line.contains("Last message repeated")
+            {
+                debug!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
+            } else {
+                warn!("FFmpeg stderr [{}]: {}", stderr_camera_id, line);
             }
-        }))
-    } else {
-        None
-    };
+        }
+        });
+        AbortOnDrop::new(move || h.abort())
+    });
 
     // Clone Arc references before passing to stream processing
     let frame_count_clone = frame_count.clone();
     let bytes_received_clone = bytes_received.clone();
+    let last_frame_at_clone = last_frame_at.clone();
 
-    // Process fMP4 stream (H.264 copy, MSE-ready)
+    // Process fMP4 stream (H.264 copy, MSE-ready).
+    // _health_guard and _stderr_guard are RAII — they abort their tasks
+    // automatically when this function returns (normally, via error, or cancellation).
     process_fmp4_stream(
         stdout,
         state,
@@ -680,13 +719,8 @@ async fn try_stream_camera(
         &app,
         frame_count_clone,
         bytes_received_clone,
+        last_frame_at_clone,
     ).await?;
-
-    // Stop background tasks FIRST to prevent race conditions
-    health_task.abort();
-    if let Some(task) = stderr_task {
-        task.abort();
-    }
 
     // Remove health entry to prevent stale "online" status
     if let Ok(mut health_map) = state.stream_health.lock() {
@@ -721,6 +755,7 @@ async fn process_fmp4_stream(
     app: &AppHandle,
     frame_count: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
+    last_frame_at: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
     let mut pending = Vec::new();
@@ -728,6 +763,7 @@ async fn process_fmp4_stream(
     let mut init_segment_buffer = Vec::new(); // Accumulate ftyp + moov
     let mut fragment_buffer: Vec<u8> = Vec::new(); // Batch moof+mdat pairs
     let mut moof_start: usize = 0; // Track where moof starts in fragment_buffer for keyframe detection
+    let mut pending_sample_count: u64 = 1; // Samples declared in the current moof, applied on mdat
 
     // Clone broadcast sender once to avoid per-fragment mutex lock acquisition.
     // With 4+ cameras at 20fps each, this eliminates ~80+ mutex locks/sec.
@@ -807,12 +843,20 @@ async fn process_fmp4_stream(
                 moof_start = fragment_buffer.len();
                 bytes_received.fetch_add(box_size as u64, Ordering::Relaxed);
                 fragment_buffer.extend_from_slice(&pending[..box_size]);
+                // Count actual video frames declared in this moof's trun boxes
+                pending_sample_count = count_samples_in_moof(&pending[..box_size]);
                 pending.drain(..box_size);
             }
             else if box_type_str == "mdat" {
-                // End of fragment: append mdat and broadcast the complete moof+mdat pair
-                frame_count.fetch_add(1, Ordering::Relaxed);
+                // End of fragment: add the real frame count from the paired moof
+                frame_count.fetch_add(pending_sample_count, Ordering::Relaxed);
                 bytes_received.fetch_add(box_size as u64, Ordering::Relaxed);
+                // Record timestamp of the last received video frame for health reporting
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                last_frame_at.store(now_ms, Ordering::Relaxed);
                 fragment_buffer.extend_from_slice(&pending[..box_size]);
                 pending.drain(..box_size);
 
@@ -859,6 +903,75 @@ async fn process_fmp4_stream(
     Ok(())
 }
 
+// ── mDNS Advertisement ───────────────────────────────────────────────────────
+
+/// Find the primary outbound IPv4 address by opening a UDP socket toward
+/// a public IP (no packets are actually sent). This reliably identifies
+/// which local interface the OS would use on the LAN.
+fn get_local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Connect to a public IP — determines routing, no packet is sent
+    socket.connect("8.8.8.8:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) => Some(ip),
+        _ => None,
+    }
+}
+
+/// Register the app as `stageview.local` via mDNS so browsers on the local
+/// network can reach the control panel at http://stageview.local:<port>/
+/// without needing to know the IP address.
+///
+/// Returns the daemon so it stays alive for the process lifetime.
+/// If mDNS is unavailable (e.g. firewall blocks multicast) this fails
+/// silently — the IP-based URL always works as a fallback.
+fn start_mdns(port: u16) -> Option<ServiceDaemon> {
+    // Resolve local IP first — mdns-sd requires explicit addresses on Windows
+    let local_ip = match get_local_ipv4() {
+        Some(ip) => ip,
+        None => {
+            warn!("mDNS: could not determine local IPv4 address, skipping registration");
+            return None;
+        }
+    };
+
+    let mdns = match ServiceDaemon::new() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("mDNS: failed to start daemon: {}", e);
+            return None;
+        }
+    };
+
+    let host_name = "stageview.local.";
+    let local_ip_str = local_ip.to_string();
+    let service_info = match ServiceInfo::new(
+        "_http._tcp.local.",
+        "StageView",
+        host_name,
+        local_ip_str.as_str(),
+        port,
+        None,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("mDNS: failed to create service info: {}", e);
+            return None;
+        }
+    };
+
+    match mdns.register(service_info) {
+        Ok(_) => {
+            info!("mDNS: registered as http://stageview.local:{}/ (IP: {})", port, local_ip);
+            Some(mdns)
+        }
+        Err(e) => {
+            warn!("mDNS: failed to register service: {}", e);
+            None
+        }
+    }
+}
+
 // ── Network Command API ──────────────────────────────────────────────────────
 
 /// Lightweight HTTP API server for remote control (Stream Deck / Companion).
@@ -867,7 +980,10 @@ async fn run_api_server(app: AppHandle, port: u16) {
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
-            info!("API server listening on http://{}", addr);
+            info!("API server listening on http://0.0.0.0:{}", port);
+            if let Some(ip) = get_local_ipv4() {
+                info!("Control panel: http://{}:{}/ or http://stageview.local:{}/", ip, port, port);
+            }
             l
         }
         Err(e) => {
@@ -978,6 +1094,18 @@ async fn run_api_server(app: AppHandle, port: u16) {
                 }
             }
 
+            // ── Control Panel UI ─────────────────────────────────────────────
+            if (path == "/" || path == "/control") && method == "GET" {
+                let html = include_str!("control_panel.html");
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    html.len()
+                );
+                let _ = stream.write_all(headers.as_bytes()).await;
+                let _ = stream.write_all(html.as_bytes()).await;
+                return;
+            }
+
             let (status, body) = if path == "/api/grid" {
                 let _ = app_handle.emit("remote-command", RemoteCommandEvent {
                     command: "grid".into(),
@@ -1022,7 +1150,7 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     Err(e) => ("500 Internal Server Error", serde_json::json!({"ok": false, "error": e}).to_string()),
                 }
             } else {
-                ("404 Not Found", r#"{"ok":false,"error":"unknown endpoint","endpoints":["/api/solo/:index","/api/grid","/api/status","/api/fullscreen","/api/reload"]}"#.to_string())
+                ("404 Not Found", r#"{"ok":false,"error":"unknown endpoint","endpoints":["/","/api/solo/:index","/api/grid","/api/status","/api/fullscreen","/api/reload"]}"#.to_string())
             };
 
             let response = format!(
@@ -1344,6 +1472,12 @@ pub fn run() {
                 run_api_server(app_handle, api_port).await;
             });
 
+            // Advertise as stageview.local on the network via mDNS.
+            // Keep the daemon alive for the process lifetime by leaking it.
+            if let Some(mdns) = start_mdns(api_port) {
+                std::mem::forget(mdns);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1352,7 +1486,6 @@ pub fn run() {
             start_streams,
             stop_streams,
             solo_camera,
-            grid_view,
             get_stream_health,
             api_fullscreen,
             api_reload,
