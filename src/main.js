@@ -79,6 +79,16 @@ class Mp4StreamReader {
       return;
     }
 
+    // Revoke the previous blob URL before creating a new one.
+    // Each createObjectURL() call leaks memory until explicitly revoked.
+    // Without this, every MSE pipeline restart (e.g. due to a transient
+    // CHUNK_DEMUXER error) accumulates a unreleased MediaSource object,
+    // eventually exhausting webview memory after hours of operation.
+    if (this.video.src && this.video.src.startsWith('blob:')) {
+      URL.revokeObjectURL(this.video.src);
+      this.video.src = '';
+    }
+
     this.mediaSource = new MediaSource();
     this.video.src = URL.createObjectURL(this.mediaSource);
 
@@ -110,6 +120,11 @@ class Mp4StreamReader {
           this._trimBuffer();
           this._checkCorruptFrames();
         }, 5000);
+
+        // Flush any segments that arrived before sourceopen fired.
+        // Without this, data queued during pipeline startup sits idle
+        // until the next incoming chunk triggers _processQueue().
+        this._processQueue();
       } catch (e) {
         if (this.onError) this.onError('Failed to create SourceBuffer');
       }
@@ -246,6 +261,18 @@ class Mp4StreamReader {
   _restart() {
     if (this._restarting || !this.running) return;
     this._restarting = true;
+
+    // Clean up any in-flight freeze-removal listener before rebuilding.
+    // If left attached, the old timeupdate handler fires on the reused
+    // video element and prematurely hides the freeze canvas.
+    if (this._freezeRemovalBound) {
+      this.video.removeEventListener('timeupdate', this._freezeRemovalBound);
+      this._freezeRemovalBound = null;
+    }
+    if (this._freezeSafetyTimer) {
+      clearTimeout(this._freezeSafetyTimer);
+      this._freezeSafetyTimer = null;
+    }
 
     // Capture last good frame before tearing down the pipeline
     this._captureFrame();
@@ -460,6 +487,12 @@ class Mp4StreamReader {
       }
     } catch (e) {
       // Ignore cleanup errors
+    }
+
+    // Revoke the blob URL so the MediaSource object can be garbage-collected.
+    if (this.video.src && this.video.src.startsWith('blob:')) {
+      URL.revokeObjectURL(this.video.src);
+      this.video.src = '';
     }
   }
 }

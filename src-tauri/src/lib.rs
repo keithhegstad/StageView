@@ -772,12 +772,24 @@ async fn process_fmp4_stream(
         .and_then(|b| b.get(camera_id).cloned());
 
     loop {
-        let n = match stdout.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
+        // Timeout each read: if FFmpeg produces no output for 30 seconds
+        // (e.g. silent RTP multicast, stalled RTSP, or hung demuxer), treat
+        // it as a failed stream so the retry wrapper can reconnect with backoff.
+        // Without this, a silent RTP source leaves FFmpeg blocked in read()
+        // indefinitely — the stream shows "online" but produces no frames.
+        let n = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            stdout.read(&mut buf),
+        ).await {
+            Ok(Ok(0)) => break,  // FFmpeg exited cleanly
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
                 error!("Read error (fMP4) for {}: {}", camera_id, e);
                 return Err(Box::new(e));
+            }
+            Err(_elapsed) => {
+                warn!("No data from FFmpeg for 30s ({}), triggering stream restart", camera_id);
+                return Err("Stream read timeout — no data from FFmpeg".into());
             }
         };
 
@@ -1083,10 +1095,25 @@ async fn run_api_server(app: AppHandle, port: u16) {
                         }
                     }
 
-                    // Stream MP4 boxes as they arrive
-                    while let Ok(box_data) = rx.recv().await {
-                        if stream.write_all(&box_data).await.is_err() {
-                            break;
+                    // Stream MP4 boxes as they arrive.
+                    // Handle RecvError::Lagged gracefully: skip the dropped frames
+                    // and resume from the oldest available message rather than
+                    // dropping the connection. Dropping the connection forces the
+                    // frontend to reconnect and rebuild its MSE pipeline, which
+                    // leaks a blob URL each time and degrades over 24+ h uptime.
+                    loop {
+                        match rx.recv().await {
+                            Ok(box_data) => {
+                                if stream.write_all(&box_data).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("HTTP stream client lagged by {} MP4 boxes, resuming from oldest", n);
+                                // next recv() returns the oldest still-buffered message
+                                continue;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
 
