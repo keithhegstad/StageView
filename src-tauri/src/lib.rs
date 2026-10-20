@@ -419,6 +419,81 @@ fn codec_label(init: &[u8]) -> &'static str {
     if has(b"hvcC") { "H.265 (copy)" } else if has(b"avcC") { "H.264 (copy)" } else { "unknown (copy)" }
 }
 
+/// Windows job object that kills every process assigned to it when its last
+/// handle closes. The OS closes our handles when StageView exits — cleanly,
+/// killed or crashed — so FFmpeg can never outlive the app. (Orphaned FFmpeg
+/// for an offline camera never notices the broken pipe, and kept the API port
+/// bound through an inherited socket, so the next launch had no video.)
+/// Only FFmpeg joins the job: the updater's installer must survive our exit.
+#[cfg(windows)]
+struct KillJob(usize); // HANDLE as usize so the job can live in a static
+
+#[cfg(windows)]
+impl KillJob {
+    fn new() -> std::io::Result<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let job = KillJob(handle as usize);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job.0 as _,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of_val(&info) as u32,
+            );
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+    }
+
+    fn assign(&self, process: std::os::windows::io::RawHandle) -> std::io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        if unsafe { AssignProcessToJobObject(self.0 as _, process as _) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillJob {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0 as _); }
+    }
+}
+
+/// The app-wide job every FFmpeg process joins (created on first use).
+#[cfg(windows)]
+fn ffmpeg_kill_job() -> Option<&'static KillJob> {
+    static JOB: std::sync::OnceLock<Option<KillJob>> = std::sync::OnceLock::new();
+    JOB.get_or_init(|| {
+        KillJob::new()
+            .map_err(|e| error!("Could not create FFmpeg job object: {}", e))
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Stop child processes from inheriting a socket (so they can't keep it bound).
+#[cfg(windows)]
+fn make_non_inheritable(socket: std::os::windows::io::RawSocket) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    if unsafe { SetHandleInformation(socket as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// RAII guard that calls an abort closure when dropped.
 /// Ensures background tasks (health monitoring, stderr capture) are cancelled
 /// even when the parent task is externally aborted via JoinHandle::abort(),
@@ -664,6 +739,13 @@ async fn try_stream_camera(
             return Err(Box::new(e));
         }
     };
+
+    #[cfg(windows)]
+    if let (Some(job), Some(handle)) = (ffmpeg_kill_job(), child.raw_handle()) {
+        if let Err(e) = job.assign(handle) {
+            warn!("Could not tie FFmpeg for {} to the app's lifetime: {}", camera_id, e);
+        }
+    }
 
     // Initialize health entry
     {
@@ -1095,6 +1177,13 @@ async fn run_api_server(app: AppHandle, port: u16) {
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawSocket;
+                if let Err(e) = make_non_inheritable(l.as_raw_socket()) {
+                    warn!("Could not make API socket non-inheritable: {}", e);
+                }
+            }
             info!("API server listening on http://0.0.0.0:{}", port);
             if let Some(ip) = get_local_ipv4() {
                 info!("Control panel: http://{}:{}/ or http://stageview.local:{}/", ip, port, port);
@@ -1785,5 +1874,44 @@ mod tests {
         assert!(!valid_api_token("a&b"));
         assert!(!valid_api_token("50%"));
         assert!(!valid_api_token("x#y"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn api_listener_socket_is_not_inherited_by_children() {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let listener = rt.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let socket = listener.as_raw_socket();
+        let flags_of = |s: u64| {
+            let mut flags = 0u32;
+            assert_ne!(unsafe { GetHandleInformation(s as _, &mut flags) }, 0);
+            flags
+        };
+        eprintln!("inherit flag before fix: {}", flags_of(socket) & HANDLE_FLAG_INHERIT);
+        make_non_inheritable(socket).unwrap();
+        assert_eq!(flags_of(socket) & HANDLE_FLAG_INHERIT, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_kill_job_ends_assigned_children() {
+        use std::os::windows::io::AsRawHandle;
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = KillJob::new().unwrap();
+        job.assign(child.as_raw_handle()).unwrap();
+        assert!(child.try_wait().unwrap().is_none(), "child should run while the job is open");
+
+        drop(job);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "child survived closing the job");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
