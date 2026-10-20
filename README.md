@@ -26,7 +26,8 @@ StageView is a lightweight desktop app that displays multiple camera streams in 
 | **Dynamic Grid** | Cameras auto-arrange in an optimal grid — just add streams and go |
 | **Solo Mode** | Double-click or press `1–9` to focus any camera full-screen |
 | **Picture-in-Picture** | One main camera full-screen with overlay cameras in the corners |
-| **Multi-Protocol** | RTP, RTSP, SRT, HTTP/MJPEG |
+| **Multi-Protocol** | RTP, RTSP, SRT, HTTP — H.264 and H.265, hardware-decoded with no transcoding |
+| **Grid Substreams** | Optional low-res URL per camera for the grid; solo switches to the full-res stream |
 | **Burn-in Protection** | Periodic shuffling, pixel orbiting, and noise overlay for 24/7 displays |
 | **Remote Control** | HTTP API + browser control panel — works with Stream Deck, Companion, and more |
 | **Stream Health** | Real-time FPS, bitrate, and uptime per camera |
@@ -104,8 +105,9 @@ HTTP / MJPEG     →  http://192.168.1.100:8080/video
 | Shuffle Interval | Minutes between camera rearrangements (burn-in protection) | 15 min |
 | Show Status Dots | Online/offline indicators | On |
 | Show Camera Names | Camera labels in grid | On |
-| Quality | Low (5fps/640p) · Medium (10fps) · High (15fps) | Medium |
 | API Port | Remote control HTTP port | 8090 |
+| API Token | Required as `?token=` on `/api/*` calls when set | empty (off) |
+| Grid substream URL | Per camera: lower-resolution stream shown in the grid (e.g. Hikvision channel `102`, Dahua `subtype=1`) | empty (grid uses main stream) |
 
 ### Config File Location
 
@@ -172,9 +174,11 @@ curl http://stageview.local:8090/api/reload
 2. Set URL: `http://192.168.1.100:8090/api/solo/1`
 3. Press to switch to camera 1
 
-### Security Note
+### Security
 
-The API has no authentication — only use it on a trusted local network. Do not expose port 8090 to the internet.
+- Set an **API token** in Settings → Network Control to require `?token=<value>` on every `/api/*` call, e.g. `http://stageview.local:8090/api/solo/1?token=…` in Stream Deck or Companion. Open the control panel once as `http://stageview.local:8090/?token=…` and it remembers the token. Without a token the API is open to anyone on the network.
+- Camera video (`/camera/*/stream`) is only served to the StageView app itself, never to other devices.
+- Do not expose port 8090 to the internet.
 
 ---
 
@@ -182,11 +186,12 @@ The API has no authentication — only use it on a trusted local network. Do not
 
 **Cameras not showing up**
 - Test the stream URL directly in VLC or with `ffmpeg -i "your_url" -f null -`
+- H.265 cameras need a GPU with HEVC hardware decode (most GPUs from 2016 on); otherwise StageView shows a "not supported" message
 - Check that your firewall allows multicast/RTSP traffic
 - Open browser DevTools → Console for FFmpeg error output
 
 **High CPU usage**
-- Lower the quality preset (Settings → Quality → Low)
+- Add a grid substream URL for high-resolution cameras (Settings → camera → Grid substream URL)
 - Reduce the number of active cameras
 - Use solo mode when you only need to watch one camera
 
@@ -201,17 +206,15 @@ The API has no authentication — only use it on a trusted local network. Do not
 ## Architecture
 
 ```
-Camera Stream (RTP/RTSP/SRT/HTTP)
+Camera Stream (RTP/RTSP/SRT/HTTP, H.264/H.265)
        ↓
-FFmpeg (spawned per camera, Rust)
+FFmpeg (one per stream, video copied — no transcode) → fragmented MP4
        ↓
-JPEG frames → Rust backend
+Rust backend: splits MP4 boxes, caches from last keyframe
        ↓
-Base64 encode → Tauri event ("camera-frame")
+Local HTTP stream (localhost:8090/camera/<id>/stream)
        ↓
-JavaScript frontend → DOM image update
-       ↓
-Browser renders frame
+WebView <video> via Media Source Extensions → GPU decode
 ```
 
 **Stack:** Vanilla JS + HTML/CSS · Rust + Tauri 2 · FFmpeg · Tokio
