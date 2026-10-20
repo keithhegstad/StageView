@@ -350,6 +350,15 @@ class Mp4StreamReader {
     }, delay);
   }
 
+  /** Point the reader at a different stream (grid substream ↔ main stream). */
+  switchUrl(url) {
+    if (url === this.url) return;
+    this.url = url;
+    // A new stream has its own init segment, so rebuild the MSE pipeline.
+    // _restart() shows the last frame on the freeze canvas until the new one renders.
+    this._restart();
+  }
+
   async start() {
     if (!this.mediaSource) return;
 
@@ -573,8 +582,11 @@ class StageView {
         // Track status in Map so we can restore it after re-render
         this.cameraStatuses.set(camera_id, status);
 
-        const tile = document.querySelector(`[data-id="${camera_id}"]`);
-        if (tile) this.applyCameraStatus(tile, status);
+        // Status may be for a grid substream (<id>.grid); only show it on the
+        // tile if that's the stream the tile is currently playing.
+        const camId = camera_id.replace(/\.grid$/, '');
+        const tile = document.querySelector(`.camera-tile[data-id="${camId}"]`);
+        if (tile && (tile.dataset.stream || camId) === camera_id) this.applyCameraStatus(tile, status);
 
         // Live-update health dot if settings panel is open
         const row = document.querySelector(`#health-stats-container [data-camera-id="${camera_id}"]`);
@@ -607,8 +619,9 @@ class StageView {
         const { camera_id, error } = event.payload;
         // Skip if a toast for this camera is already showing
         if (this._activeErrorToasts.has(camera_id)) return;
-        const camera = this.cameras.find(c => c.id === camera_id);
-        const cameraName = camera ? camera.name : camera_id;
+        const camId = camera_id.replace(/\.grid$/, '');
+        const camera = this.cameras.find(c => c.id === camId);
+        const cameraName = (camera ? camera.name : camId) + (camId !== camera_id ? ' (grid stream)' : '');
         this._activeErrorToasts.set(camera_id, true);
         this.showToast(`${cameraName}: ${error}`, 'error');
         // Clear duplicate guard after toast duration (10s) + fade (300ms)
@@ -754,6 +767,27 @@ class StageView {
     }
   }
 
+  /** Stream id for a camera: its grid substream in grid view when configured, else the main stream. */
+  streamIdFor(cam, solo) {
+    return !solo && cam.grid_url ? `${cam.id}.grid` : cam.id;
+  }
+
+  streamUrl(streamId) {
+    return `http://localhost:${this.apiPort}/camera/${streamId}/stream`;
+  }
+
+  /** Switch a tile's reader to the right stream and show that stream's last known status. */
+  _useStream(cam, solo) {
+    const streamId = this.streamIdFor(cam, solo);
+    const tile = document.querySelector(`.camera-tile[data-id="${cam.id}"]`);
+    if (tile) {
+      tile.dataset.stream = streamId;
+      const status = this.cameraStatuses.get(streamId);
+      if (status) this.applyCameraStatus(tile, status);
+    }
+    this.streamReaders.get(cam.id)?.switchUrl(this.streamUrl(streamId));
+  }
+
   bindTileEvents(grid) {
     // Stop any existing stream readers before creating new ones
     this._stopAllReaders();
@@ -763,7 +797,12 @@ class StageView {
       const camId = tile.dataset.id;
       if (!camId) return;
 
-      const url = `http://localhost:${this.apiPort}/camera/${camId}/stream`;
+      const cam = this.cameras.find(c => c.id === camId);
+      if (!cam) return;
+      const isSolo = this.soloIndex !== null && this.cameras[this.soloIndex - 1]?.id === camId;
+      const streamId = this.streamIdFor(cam, isSolo);
+      tile.dataset.stream = streamId;
+      const url = this.streamUrl(streamId);
       const video = tile.querySelector("video");
       if (!video) return;
       
@@ -780,8 +819,7 @@ class StageView {
       };
 
       reader.onUnsupportedCodec = (name, codec) => {
-        const cam = this.cameras.find(c => c.id === camId);
-        this.showToast(`${cam ? cam.name : camId}: ${name} (${codec}) is not supported by this PC's video decoder`, 'error');
+        this.showToast(`${cam.name}: ${name} (${codec}) is not supported by this PC's video decoder`, 'error');
       };
 
       // No onError handler — transient MSE/stream errors are auto-recovered
@@ -903,6 +941,7 @@ class StageView {
 
   async soloCamera(index) {
     if (index < 1 || index > this.cameras.length) return;
+    const prevSolo = this.soloIndex !== null ? this.cameras[this.soloIndex - 1] : null;
     this.soloIndex = index;
     const cam = this.cameras[index - 1];
 
@@ -920,6 +959,9 @@ class StageView {
       }
     });
 
+    if (prevSolo && prevSolo.id !== cam.id) this._useStream(prevSolo, false);
+    this._useStream(cam, true);
+
     // Switch grid to single cell
     grid.style.gridTemplateColumns = "1fr";
     grid.style.gridTemplateRows = "1fr";
@@ -936,6 +978,7 @@ class StageView {
 
   async exitSolo() {
     if (this.soloIndex === null) return;
+    const soloCam = this.cameras[this.soloIndex - 1];
     this.soloIndex = null;
 
     const grid = document.getElementById("grid");
@@ -951,6 +994,8 @@ class StageView {
       tile.classList.remove("solo");
       tile.style.display = "";
     });
+
+    if (soloCam) this._useStream(soloCam, false);
 
     // Restore display order from shuffle state
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
@@ -1488,6 +1533,7 @@ class StageView {
         <span class="api-index" title="API: /api/solo/${i + 1}">Camera ${i + 1}</span>
         <input type="text" placeholder="Camera name" value="${escapeHtml(cam.name)}" data-field="name" />
         <input type="text" placeholder="rtp://224.1.2.4:4000" value="${escapeHtml(cam.url)}" data-field="url" />
+        <input type="text" placeholder="Grid substream URL (optional, lower resolution)" value="${escapeHtml(cam.grid_url || '')}" data-field="grid_url" />
         <button class="remove-btn" data-remove-index="${i}">✕</button>
       </div>
     `;
@@ -1510,6 +1556,7 @@ class StageView {
     entry.innerHTML = `
       <input type="text" placeholder="Camera name" value="" data-field="name" />
       <input type="text" placeholder="rtp://224.1.2.4:4000" value="" data-field="url" />
+      <input type="text" placeholder="Grid substream URL (optional, lower resolution)" value="" data-field="grid_url" />
       <button class="remove-btn">✕</button>
     `;
     entry.querySelector('.remove-btn').addEventListener('click', () => this.removeCameraField(index));
@@ -1546,12 +1593,14 @@ class StageView {
     entries.forEach((entry) => {
       const name = entry.querySelector('[data-field="name"]').value.trim();
       const url = entry.querySelector('[data-field="url"]').value.trim();
+      const gridUrl = entry.querySelector('[data-field="grid_url"]').value.trim();
       if (url) {
         const existingCamera = existingCamerasMap.get(url);
         const camera = {
           id: existingCamera?.id || crypto.randomUUID(),
           name: name || `Camera ${cameras.length + 1}`,
           url,
+          grid_url: gridUrl || null,
         };
         cameras.push(camera);
       }
