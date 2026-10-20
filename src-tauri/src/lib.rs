@@ -134,8 +134,17 @@ fn get_config(state: State<AppState>) -> Result<AppConfig, String> {
     Ok(config)
 }
 
+/// Tokens travel in URLs (`?token=`), so keep them to characters that never
+/// need percent-encoding — otherwise the control panel's encoded form never matches.
+fn valid_api_token(token: &str) -> bool {
+    token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[tauri::command]
 fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> {
+    if !valid_api_token(&config.api_token) {
+        return Err("API token may only contain letters, digits, - and _".to_string());
+    }
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
     *state.config.lock()
@@ -1765,5 +1774,16 @@ mod tests {
     fn camera_without_grid_url_still_loads() {
         let c: Camera = serde_json::from_str(r#"{"id":"a","name":"A","url":"rtp://1.2.3.4:5"}"#).unwrap();
         assert_eq!(c.grid_url, None);
+    }
+
+    #[test]
+    fn api_token_charset() {
+        assert!(valid_api_token(""));
+        assert!(valid_api_token("a1B2-c3_d4"));
+        assert!(!valid_api_token("stage view"));
+        assert!(!valid_api_token("a+b"));
+        assert!(!valid_api_token("a&b"));
+        assert!(!valid_api_token("50%"));
+        assert!(!valid_api_token("x#y"));
     }
 }
