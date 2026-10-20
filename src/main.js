@@ -505,6 +505,7 @@ class StageView {
     this.showStatusDots = true;
     this.showCameraNames = true;
     this.apiPort = 8090;
+    this.apiToken = "";
     this.shuffleTimerId = null;
     this._noiseDataUrl = null; // cached noise texture for pixel refresh
     this.nextShuffleAt = 0;
@@ -535,6 +536,7 @@ class StageView {
       this.showStatusDots = config.show_status_dots !== false;
       this.showCameraNames = config.show_camera_names !== false;
       this.apiPort = config.api_port || 8090;
+      this.apiToken = config.api_token || "";
 
       // Listen for camera status events (online / offline / error / connecting / reconnecting)
       this.unlistenStatus = await listen("camera-status", (event) => {
@@ -639,6 +641,9 @@ class StageView {
     document.getElementById('settings-close-btn').addEventListener('click', () => this.closeSettings());
     document.getElementById('add-camera-btn').addEventListener('click', () => this.addCameraField());
     document.getElementById('save-settings-btn').addEventListener('click', () => this.saveSettings());
+    document.getElementById('generate-api-token').addEventListener('click', () => {
+      document.getElementById('api-token').value = crypto.randomUUID().replace(/-/g, '');
+    });
     document.getElementById('check-update-btn').addEventListener('click', () => this.checkForUpdates(true));
 
     // Update modal buttons
@@ -1150,6 +1155,7 @@ class StageView {
     document.getElementById("show-status-dots").checked = this.showStatusDots;
     document.getElementById("show-camera-names").checked = this.showCameraNames;
     document.getElementById("api-port").value = this.apiPort;
+    document.getElementById("api-token").value = this.apiToken;
     this.renderCameraList();
     this.injectHealthSection();
   }
@@ -1526,6 +1532,7 @@ class StageView {
     const showStatusDots = document.getElementById("show-status-dots").checked;
     const showCameraNames = document.getElementById("show-camera-names").checked;
     const apiPort = parseInt(document.getElementById("api-port").value, 10) || 8090;
+    const apiToken = document.getElementById("api-token").value.trim();
 
     try {
       // Read existing config to preserve window_state and other fields
@@ -1535,6 +1542,7 @@ class StageView {
       config.show_status_dots = showStatusDots;
       config.show_camera_names = showCameraNames;
       config.api_port = apiPort;
+      config.api_token = apiToken;
 
       await invoke("save_config", { config });
 
@@ -1544,6 +1552,7 @@ class StageView {
       this.showStatusDots = showStatusDots;
       this.showCameraNames = showCameraNames;
       this.apiPort = apiPort;
+      this.apiToken = apiToken;
 
       // Restart streams with new camera list and codec settings
       this._stopAllReaders();

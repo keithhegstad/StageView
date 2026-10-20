@@ -47,6 +47,9 @@ pub struct AppConfig {
     pub show_camera_names: bool,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    /// Shared secret for /api/* requests from the network (`?token=`). Empty = no auth.
+    #[serde(default)]
+    pub api_token: String,
     #[serde(default)]
     pub window_state: WindowState,
 }
@@ -62,6 +65,7 @@ impl Default for AppConfig {
             show_status_dots: true,
             show_camera_names: true,
             api_port: 8090,
+            api_token: String::new(),
             window_state: WindowState::default(),
         }
     }
@@ -1012,6 +1016,29 @@ fn start_mdns(port: u16) -> Option<ServiceDaemon> {
 
 /// Lightweight HTTP API server for remote control (Stream Deck / Companion).
 /// Listens on the configured port and forwards commands to the frontend via events.
+/// Split an HTTP request target into path and optional query string.
+fn split_path_query(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    }
+}
+
+/// True when `expected` is empty (auth disabled) or the query carries `token=<expected>`.
+fn token_ok(query: Option<&str>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return true;
+    }
+    let given = query
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .unwrap_or("");
+    // Constant-time compare so response timing doesn't leak the token
+    given.len() == expected.len()
+        && given.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
 async fn run_api_server(app: AppHandle, port: u16) {
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
@@ -1048,7 +1075,8 @@ async fn run_api_server(app: AppHandle, port: u16) {
             let request = String::from_utf8_lossy(&buf[..n]);
             let first_line = request.lines().next().unwrap_or("");
             let method = first_line.split_whitespace().next().unwrap_or("");
-            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+            let target = first_line.split_whitespace().nth(1).unwrap_or("/");
+            let (path, query) = split_path_query(target);
 
             debug!("API request from {}: {} {}", peer, method, path);
 
@@ -1067,6 +1095,11 @@ async fn run_api_server(app: AppHandle, port: u16) {
 
             // Handle streaming endpoint (fMP4 for MSE)
             if path.starts_with("/camera/") && path.ends_with("/stream") {
+                // Video is for the local webview only — never serve it to the LAN
+                if !peer.ip().is_loopback() {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    return;
+                }
                 // Extract camera ID from path like "/camera/cam1/stream"
                 let parts: Vec<&str> = path.split('/').collect();
                 if parts.len() >= 3 {
@@ -1157,6 +1190,19 @@ async fn run_api_server(app: AppHandle, port: u16) {
                 );
                 let _ = stream.write_all(headers.as_bytes()).await;
                 let _ = stream.write_all(html.as_bytes()).await;
+                return;
+            }
+
+            let expected_token = app_handle.state::<AppState>().config.lock()
+                .map(|c| c.api_token.clone())
+                .unwrap_or_default();
+            if path.starts_with("/api/") && !token_ok(query, &expected_token) {
+                let body = r#"{"ok":false,"error":"invalid or missing token"}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
                 return;
             }
 
@@ -1622,5 +1668,33 @@ mod tests {
         let mut waiting = true;
         assert!(should_forward(&init, &mut waiting));
         assert!(waiting, "init segment must not end the wait for a keyframe");
+    }
+
+    #[test]
+    fn splits_path_and_query() {
+        assert_eq!(split_path_query("/api/grid"), ("/api/grid", None));
+        assert_eq!(split_path_query("/api/solo/2?token=abc"), ("/api/solo/2", Some("token=abc")));
+    }
+
+    #[test]
+    fn empty_token_means_auth_disabled() {
+        assert!(token_ok(None, ""));
+        assert!(token_ok(Some("token=whatever"), ""));
+    }
+
+    #[test]
+    fn token_must_match_when_set() {
+        assert!(token_ok(Some("token=s3cret"), "s3cret"));
+        assert!(token_ok(Some("a=1&token=s3cret"), "s3cret"));
+        assert!(!token_ok(None, "s3cret"));
+        assert!(!token_ok(Some("token=wrong"), "s3cret"));
+        assert!(!token_ok(Some("token=s3cre"), "s3cret"));
+        assert!(!token_ok(Some("tokenx=s3cret"), "s3cret"));
+    }
+
+    #[test]
+    fn config_without_api_token_still_loads() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
+        assert_eq!(cfg.api_token, "");
     }
 }

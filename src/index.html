@@ -135,6 +135,14 @@
             <input type="number" id="api-port" min="1024" max="65535" value="8090" />
           </div>
         </label>
+        <label>
+          API token
+          <div class="interval-input">
+            <input type="text" id="api-token" placeholder="Leave empty for no authentication" autocomplete="off" spellcheck="false" />
+            <button type="button" id="generate-api-token" class="check-update-btn">Generate</button>
+          </div>
+        </label>
+        <p class="hint">When set, network calls need <code>?token=…</code>, e.g. <code>/api/grid?token=…</code>. Open the control panel once as <code>http://stageview.local:8090/?token=…</code>.</p>
         <p class="hint">HTTP API and browser control panel (requires restart to change port)</p>
         <div class="api-endpoints">
           <p class="hint" style="margin-top:12px;font-family:monospace">

@@ -770,6 +770,12 @@ button {
   width: 80px;
 }
 
+.interval-input input#api-token {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+}
+
 .interval-input input[type=number]::-webkit-inner-spin-button,
 .interval-input input[type=number]::-webkit-outer-spin-button {
   -webkit-appearance: none;

@@ -376,6 +376,10 @@
           <label>Port</label>
           <input type="number" id="fPort" value="8090" min="1" max="65535">
         </div>
+        <div class="field">
+          <label>API Token (optional)</label>
+          <input type="text" id="fToken" placeholder="Leave empty if none" autocomplete="off">
+        </div>
       </div>
       <div class="form-btns">
         <button class="btn ghost" onclick="toggleAddForm()">Cancel</button>
@@ -400,6 +404,17 @@ const LOCAL_HOST = window.location.host;
 let remotePcs = [];
 try { remotePcs = JSON.parse(localStorage.getItem('sv_pcs') || '[]'); } catch(e) {}
 
+// Token for this PC comes from the page URL (?token=…) and is remembered
+const urlToken = new URLSearchParams(location.search).get('token');
+if (urlToken) localStorage.setItem('sv_local_token', urlToken);
+const localToken = localStorage.getItem('sv_local_token') || '';
+
+function tokenFor(host) {
+  if (host === LOCAL_HOST) return localToken;
+  const pc = remotePcs.find(p => p.host === host);
+  return pc?.token || '';
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   renderLocalCard();
@@ -421,14 +436,16 @@ function addPc() {
   const name = document.getElementById('fName').value.trim();
   const hostRaw = document.getElementById('fHost').value.trim();
   const port = parseInt(document.getElementById('fPort').value) || 8090;
+  const token = document.getElementById('fToken').value.trim();
   if (!hostRaw) { document.getElementById('fHost').focus(); return; }
   const displayName = name || 'Remote PC';
   const host = hostRaw.includes(':') ? hostRaw : `${hostRaw}:${port}`;
-  remotePcs.push({ id: `pc_${Date.now()}`, name: displayName, host });
+  remotePcs.push({ id: `pc_${Date.now()}`, name: displayName, host, token });
   savePcs();
   document.getElementById('fName').value = '';
   document.getElementById('fHost').value = '';
   document.getElementById('fPort').value = '8090';
+  document.getElementById('fToken').value = '';
   toggleAddForm();
   renderRemoteCards();
 }
@@ -650,9 +667,12 @@ function flashBtn(el) {
 }
 
 function fetchTimeout(url, ms) {
+  const u = new URL(url);
+  const token = tokenFor(u.host);
+  if (token) u.searchParams.set('token', token);
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+  return fetch(u, { signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
 function esc(s) {
