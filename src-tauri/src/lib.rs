@@ -20,6 +20,9 @@ pub struct Camera {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// Optional low-res substream shown in the grid; `url` is used in solo mode.
+    #[serde(default)]
+    pub grid_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -140,6 +143,41 @@ fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> 
     Ok(())
 }
 
+/// Stream id suffix for a camera's grid substream (camera ids are UUIDs, so no clash).
+const GRID_SUFFIX: &str = ".grid";
+
+/// (stream id, url) pairs to run for a camera: always the main stream, plus
+/// the grid substream when one is configured.
+fn stream_targets(camera: &Camera) -> Vec<(String, String)> {
+    let mut targets = vec![(camera.id.clone(), camera.url.clone())];
+    if let Some(grid) = camera.grid_url.as_deref().map(str::trim) {
+        if !grid.is_empty() && grid != camera.url {
+            targets.push((format!("{}{}", camera.id, GRID_SUFFIX), grid.to_string()));
+        }
+    }
+    targets
+}
+
+/// Spawn one retrying stream task per stream target, keyed by stream id.
+fn spawn_camera_streams(
+    app: &AppHandle,
+    ffmpeg_path: &PathBuf,
+    cameras: &[Camera],
+    tasks: &mut HashMap<String, tauri::async_runtime::JoinHandle<()>>,
+) {
+    for camera in cameras {
+        for (stream_id, url) in stream_targets(camera) {
+            let app_handle = app.clone();
+            let ffmpeg = ffmpeg_path.clone();
+            let id = stream_id.clone();
+            let handle = tauri::async_runtime::spawn(async move {
+                stream_camera(app_handle, ffmpeg, id, url).await;
+            });
+            tasks.insert(stream_id, handle);
+        }
+    }
+}
+
 #[tauri::command]
 fn start_streams(state: State<AppState>, app: AppHandle) {
     info!("start_streams called");
@@ -167,18 +205,7 @@ fn start_streams(state: State<AppState>, app: AppHandle) {
         handle.abort();
     }
 
-    for camera in &config.cameras {
-        let cam_id = camera.id.clone();
-        let cam_url = camera.url.clone();
-        let ffmpeg = ffmpeg_path.clone();
-        let app_handle = app.clone();
-
-        let handle = tauri::async_runtime::spawn(async move {
-            stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
-        });
-
-        tasks.insert(camera.id.clone(), handle);
-    }
+    spawn_camera_streams(&app, &ffmpeg_path, &config.cameras, &mut tasks);
 }
 
 #[tauri::command]
@@ -1430,18 +1457,7 @@ async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_
     // Start streams for new config
     {
         let mut tasks = state.stream_tasks.lock().map_err(|_| "stream_tasks mutex poisoned")?;
-        for camera in &cameras {
-            let cam_id = camera.id.clone();
-            let cam_url = camera.url.clone();
-            let ffmpeg = ffmpeg_path.clone();
-            let app_handle = app.clone();
-
-            let handle = tauri::async_runtime::spawn(async move {
-                stream_camera(app_handle, ffmpeg, cam_id, cam_url).await;
-            });
-
-            tasks.insert(camera.id.clone(), handle);
-        }
+        spawn_camera_streams(&app, &ffmpeg_path, &cameras, &mut tasks);
     }
 
     // Emit reload event to frontend
@@ -1719,5 +1735,35 @@ mod tests {
         assert_eq!(codec_label(b"....ftypisom....avc1....avcC\x01\x64"), "H.264 (copy)");
         assert_eq!(codec_label(b"....ftypisom....hev1....hvcC\x01\x01"), "H.265 (copy)");
         assert_eq!(codec_label(b"....ftypisom"), "unknown (copy)");
+    }
+
+    fn cam(url: &str, grid: Option<&str>) -> Camera {
+        Camera { id: "abc".into(), name: "A".into(), url: url.into(), grid_url: grid.map(Into::into) }
+    }
+
+    #[test]
+    fn main_stream_only_without_grid_url() {
+        assert_eq!(stream_targets(&cam("rtsp://x/main", None)),
+                   vec![("abc".to_string(), "rtsp://x/main".to_string())]);
+    }
+
+    #[test]
+    fn grid_stream_added_when_grid_url_set() {
+        assert_eq!(stream_targets(&cam("rtsp://x/main", Some("rtsp://x/sub"))), vec![
+            ("abc".to_string(), "rtsp://x/main".to_string()),
+            ("abc.grid".to_string(), "rtsp://x/sub".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn blank_or_duplicate_grid_url_ignored() {
+        assert_eq!(stream_targets(&cam("rtsp://x/main", Some("  "))).len(), 1);
+        assert_eq!(stream_targets(&cam("rtsp://x/main", Some("rtsp://x/main"))).len(), 1);
+    }
+
+    #[test]
+    fn camera_without_grid_url_still_loads() {
+        let c: Camera = serde_json::from_str(r#"{"id":"a","name":"A","url":"rtp://1.2.3.4:5"}"#).unwrap();
+        assert_eq!(c.grid_url, None);
     }
 }
