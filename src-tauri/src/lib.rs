@@ -314,6 +314,24 @@ fn is_keyframe_fragment(moof_data: &[u8]) -> bool {
     false
 }
 
+/// Decide whether a broadcast message goes to an HTTP client. After the client
+/// lags, mid-GOP fragments would make the decoder smear until the next IDR, so
+/// drop fragments until a keyframe arrives. Init segments (ftyp+moov) always
+/// pass: FFmpeg emits a fresh one after every reconnect.
+fn should_forward(msg: &[u8], waiting_for_keyframe: &mut bool) -> bool {
+    if msg.len() >= 8 && &msg[4..8] == b"ftyp" {
+        return true;
+    }
+    if !*waiting_for_keyframe {
+        return true;
+    }
+    if is_keyframe_fragment(msg) {
+        *waiting_for_keyframe = false;
+        return true;
+    }
+    false
+}
+
 /// Count the total number of video samples (frames) declared in all trun boxes
 /// inside a moof box. This gives the exact frame count for the following mdat,
 /// which may contain multiple frames when frag_duration > one frame period.
@@ -1102,22 +1120,25 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     }
 
                     // Stream MP4 boxes as they arrive.
-                    // Handle RecvError::Lagged gracefully: skip the dropped frames
-                    // and resume from the oldest available message rather than
-                    // dropping the connection. Dropping the connection forces the
-                    // frontend to reconnect and rebuild its MSE pipeline, which
-                    // leaks a blob URL each time and degrades over 24+ h uptime.
+                    // Handle RecvError::Lagged gracefully: keep the connection and
+                    // resume at the next keyframe, so the decoder never sees a
+                    // broken GOP (smearing until the next IDR). Dropping the
+                    // connection instead would force the frontend to rebuild its
+                    // MSE pipeline, which degrades over 24+ h uptime.
+                    let mut waiting_for_keyframe = false;
                     loop {
                         match rx.recv().await {
                             Ok(box_data) => {
+                                if !should_forward(&box_data, &mut waiting_for_keyframe) {
+                                    continue;
+                                }
                                 if stream.write_all(&box_data).await.is_err() {
                                     break;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("HTTP stream client lagged by {} MP4 boxes, resuming from oldest", n);
-                                // next recv() returns the oldest still-buffered message
-                                continue;
+                                warn!("HTTP stream client lagged by {} fragments, skipping to next keyframe", n);
+                                waiting_for_keyframe = true;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
@@ -1548,5 +1569,58 @@ mod tests {
     fn udp_url_is_rewritten_to_join_group() {
         let (_, input) = build_input_args("udp://239.1.1.1:5000");
         assert_eq!(input, "udp://@239.1.1.1:5000?timeout=10000000");
+    }
+
+    fn test_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// A moof+mdat fragment whose trun carries first_sample_flags.
+    fn test_fragment(keyframe: bool) -> Vec<u8> {
+        // sample_is_non_sync_sample is bit 16 of the sample flags
+        let first_sample_flags: u32 = if keyframe { 0x0200_0000 } else { 0x0101_0000 };
+        let mut trun = vec![0, 0, 0, 0x05]; // version 0, flags = data_offset | first_sample_flags
+        trun.extend_from_slice(&1u32.to_be_bytes()); // sample_count
+        trun.extend_from_slice(&0u32.to_be_bytes()); // data_offset
+        trun.extend_from_slice(&first_sample_flags.to_be_bytes());
+        let mut moof = test_box(b"mfhd", &[0; 8]);
+        moof.extend(test_box(b"traf", &test_box(b"trun", &trun)));
+        let mut frag = test_box(b"moof", &moof);
+        frag.extend(test_box(b"mdat", &[0xAA; 16]));
+        frag
+    }
+
+    #[test]
+    fn test_fragment_helper_matches_keyframe_parser() {
+        assert!(is_keyframe_fragment(&test_fragment(true)));
+        assert!(!is_keyframe_fragment(&test_fragment(false)));
+    }
+
+    #[test]
+    fn forwards_everything_when_not_lagged() {
+        let mut waiting = false;
+        assert!(should_forward(&test_fragment(false), &mut waiting));
+        assert!(should_forward(&test_fragment(true), &mut waiting));
+    }
+
+    #[test]
+    fn after_lag_drops_until_keyframe() {
+        let mut waiting = true;
+        assert!(!should_forward(&test_fragment(false), &mut waiting));
+        assert!(waiting);
+        assert!(should_forward(&test_fragment(true), &mut waiting));
+        assert!(!waiting);
+        assert!(should_forward(&test_fragment(false), &mut waiting));
+    }
+
+    #[test]
+    fn init_segment_always_forwarded() {
+        let init = test_box(b"ftyp", b"isom\0\0\x02\0");
+        let mut waiting = true;
+        assert!(should_forward(&init, &mut waiting));
+        assert!(waiting, "init segment must not end the wait for a keyframe");
     }
 }
