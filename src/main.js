@@ -769,7 +769,7 @@ class StageView {
 
   /** Stream id for a camera: its grid substream in grid view when configured, else the main stream. */
   streamIdFor(cam, solo) {
-    return !solo && cam.grid_url ? `${cam.id}.grid` : cam.id;
+    return (!solo && gridStreamId(cam)) || cam.id;
   }
 
   streamUrl(streamId) {
