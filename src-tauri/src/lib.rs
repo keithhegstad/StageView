@@ -459,40 +459,9 @@ async fn stream_camera(
     }
 }
 
-/// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
-/// and broadcasts each frame to HTTP MJPEG stream clients.
-async fn try_stream_camera(
-    app: &AppHandle,
-    state: &tauri::State<'_, AppState>,
-    ffmpeg_path: &PathBuf,
-    camera_id: &str,
-    url: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let start_time = std::time::Instant::now();
-
-    // Use atomic counters so they can be shared with the health update task
-    let frame_count = Arc::new(AtomicU64::new(0));
-    let bytes_received = Arc::new(AtomicU64::new(0));
-    let last_frame_at = Arc::new(AtomicU64::new(0)); // Unix ms timestamp of last received frame
-
-    info!("Spawning FFmpeg for camera {} ({})", camera_id, url);
-
-    // Create broadcast channel for HTTP streaming (Arc<Vec<u8>> avoids cloning frames)
-    {
-        let mut broadcasters = state.frame_broadcasters.lock().unwrap();
-        broadcasters.entry(camera_id.to_string())
-            .or_insert_with(|| {
-                info!("Created frame broadcaster for camera: {}", camera_id);
-                tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0
-            });
-    }
-
-    let mut args: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-    ];
-
+/// Protocol-specific FFmpeg input flags plus the (possibly rewritten) input URL.
+fn build_input_args(url: &str) -> (Vec<String>, String) {
+    let mut args: Vec<String> = Vec::new();
     // Rewrite the input URL and add protocol-specific flags
     let input_url = if url.starts_with("rtp://") {
         // RTP multicast: use FFmpeg's native rtp:// protocol handler.
@@ -534,7 +503,7 @@ async fn try_stream_camera(
             "-rtsp_transport".into(),    "tcp".into(),
             "-allowed_media_types".into(),"video".into(),
             "-thread_queue_size".into(), "512".into(),
-            "-stimeout".into(),          "10000000".into(), // 10s RTSP connect timeout
+            "-timeout".into(),           "10000000".into(), // 10s socket timeout (µs); -stimeout was removed in FFmpeg 5
         ]);
         url.to_string()
     } else if url.starts_with("srt://") {
@@ -559,8 +528,45 @@ async fn try_stream_camera(
         ]);
         url.to_string()
     };
+    (args, input_url)
+}
 
-    // Add input URL
+/// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
+/// and broadcasts each frame to HTTP MJPEG stream clients.
+async fn try_stream_camera(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+    ffmpeg_path: &PathBuf,
+    camera_id: &str,
+    url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let start_time = std::time::Instant::now();
+
+    // Use atomic counters so they can be shared with the health update task
+    let frame_count = Arc::new(AtomicU64::new(0));
+    let bytes_received = Arc::new(AtomicU64::new(0));
+    let last_frame_at = Arc::new(AtomicU64::new(0)); // Unix ms timestamp of last received frame
+
+    info!("Spawning FFmpeg for camera {} ({})", camera_id, url);
+
+    // Create broadcast channel for HTTP streaming (Arc<Vec<u8>> avoids cloning frames)
+    {
+        let mut broadcasters = state.frame_broadcasters.lock().unwrap();
+        broadcasters.entry(camera_id.to_string())
+            .or_insert_with(|| {
+                info!("Created frame broadcaster for camera: {}", camera_id);
+                tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0
+            });
+    }
+
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+    ];
+
+    let (input_args, input_url) = build_input_args(url);
+    args.extend(input_args);
     args.extend(["-i".into(), input_url]);
 
     // Always use H.264 copy → fMP4 output (no transcoding)
@@ -1519,4 +1525,28 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str())
+    }
+
+    #[test]
+    fn rtsp_uses_timeout_not_removed_stimeout() {
+        let (args, input) = build_input_args("rtsp://cam.local:554/stream");
+        assert_eq!(input, "rtsp://cam.local:554/stream");
+        assert!(!args.iter().any(|a| a == "-stimeout"), "FFmpeg 5+ rejects -stimeout");
+        assert_eq!(arg_after(&args, "-timeout"), Some("10000000"));
+        assert_eq!(arg_after(&args, "-rtsp_transport"), Some("tcp"));
+    }
+
+    #[test]
+    fn udp_url_is_rewritten_to_join_group() {
+        let (_, input) = build_input_args("udp://239.1.1.1:5000");
+        assert_eq!(input, "udp://@239.1.1.1:5000?timeout=10000000");
+    }
 }
