@@ -26,8 +26,8 @@ function escapeHtml(str) {
 
 // ── MSE-based fMP4 Stream Reader ────────────────────────────────────────────
 // Reads fMP4 stream via fetch() and feeds it to a <video> element using
-// Media Source Extensions for hardware-accelerated H.264 decode.
-// No transcoding needed - direct playback of H.264 RTP streams.
+// Media Source Extensions for hardware-accelerated H.264/H.265 decode.
+// No transcoding needed - direct playback of the camera's own stream.
 
 class Mp4StreamReader {
   constructor(url, video) {
@@ -49,6 +49,8 @@ class Mp4StreamReader {
     this._freezeCanvas = null; // Canvas element used to hold last frame during restarts
     this._lastCorruptedCount = 0; // Track corruptedVideoFrames for glitch detection
     this._lastGoodFrameAt = 0; // Timestamp of last known-good frame capture
+    this._sourceOpen = false; // MediaSource fired sourceopen; SourceBuffer waits for the codec
+    this.onUnsupportedCodec = null;
 
     // Bind video event handlers so they can be removed on restart
     this._onVideoError = (e) => {
@@ -93,47 +95,73 @@ class Mp4StreamReader {
     this.video.src = URL.createObjectURL(this.mediaSource);
 
     this.mediaSource.addEventListener('sourceopen', () => {
-      try {
-        const codec = 'video/mp4; codecs="avc1.42E01E"';
-        if (!MediaSource.isTypeSupported(codec)) {
-          if (this.onError) this.onError('H.264 codec not supported');
-          return;
-        }
-
-        this.sourceBuffer = this.mediaSource.addSourceBuffer(codec);
-        this.sourceBuffer.mode = 'sequence';
-        
-        this.sourceBuffer.addEventListener('updateend', () => {
-          this.isUpdating = false;
-          this._chaseLiveEdge();
-          this._processQueue();
-        });
-
-        this.sourceBuffer.addEventListener('error', (e) => {
-          console.warn('[Mp4StreamReader] SourceBuffer error, restarting pipeline');
-          this._restart();
-        });
-
-        // Start periodic buffer trimming (every 5s) and corrupt-frame monitor
-        if (this._trimTimer) clearInterval(this._trimTimer);
-        this._trimTimer = setInterval(() => {
-          this._trimBuffer();
-          this._checkCorruptFrames();
-        }, 5000);
-
-        // Flush any segments that arrived before sourceopen fired.
-        // Without this, data queued during pipeline startup sits idle
-        // until the next incoming chunk triggers _processQueue().
-        this._processQueue();
-      } catch (e) {
-        if (this.onError) this.onError('Failed to create SourceBuffer');
-      }
+      this._sourceOpen = true;
+      this._ensureSourceBuffer();
     });
 
     this.mediaSource.addEventListener('error', (e) => {
       console.warn('[Mp4StreamReader] MediaSource error, restarting pipeline');
       this._restart();
     });
+  }
+
+  /** Create the SourceBuffer once the init segment reveals the codec. */
+  _ensureSourceBuffer() {
+    if (this.sourceBuffer || !this._sourceOpen || this.mediaSource?.readyState !== 'open') return;
+    if (this.queue.length === 0) return;
+
+    const totalLen = this.queue.reduce((sum, s) => sum + s.byteLength, 0);
+    const head = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const s of this.queue) { head.set(s, offset); offset += s.byteLength; }
+
+    const codec = detectCodecString(head);
+    if (!codec) {
+      // Init segment not complete yet — wait for more bytes. An init segment is a
+      // few KB, so 2 MB without avcC/hvcC means a codec MSE path can't play.
+      if (totalLen > 2 * 1024 * 1024) {
+        console.error('[Mp4StreamReader] No H.264/H.265 config found in stream');
+        if (this.onUnsupportedCodec) this.onUnsupportedCodec('This codec', 'not H.264/H.265');
+        this.stop();
+      }
+      return;
+    }
+
+    const mime = `video/mp4; codecs="${codec}"`;
+    if (!MediaSource.isTypeSupported(mime)) {
+      const name = codec.startsWith('avc1') ? 'H.264' : 'H.265';
+      console.error(`[Mp4StreamReader] ${name} (${codec}) not supported by this system`);
+      if (this.onUnsupportedCodec) this.onUnsupportedCodec(name, codec);
+      this.stop();
+      return;
+    }
+
+    try {
+      this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
+      this.sourceBuffer.mode = 'sequence';
+
+      this.sourceBuffer.addEventListener('updateend', () => {
+        this.isUpdating = false;
+        this._chaseLiveEdge();
+        this._processQueue();
+      });
+
+      this.sourceBuffer.addEventListener('error', () => {
+        console.warn('[Mp4StreamReader] SourceBuffer error, restarting pipeline');
+        this._restart();
+      });
+
+      // Start periodic buffer trimming (every 5s) and corrupt-frame monitor
+      if (this._trimTimer) clearInterval(this._trimTimer);
+      this._trimTimer = setInterval(() => {
+        this._trimBuffer();
+        this._checkCorruptFrames();
+      }, 5000);
+
+      this._processQueue();
+    } catch (e) {
+      if (this.onError) this.onError('Failed to create SourceBuffer');
+    }
   }
 
   /**
@@ -312,6 +340,7 @@ class Mp4StreamReader {
         }
       } catch (e) { /* ignore */ }
       this.sourceBuffer = null;
+      this._sourceOpen = false;
       this.mediaSource = null;
 
       // Rebuild the pipeline and reconnect
@@ -359,19 +388,18 @@ class Mp4StreamReader {
           if (value && value.byteLength > 0) {
             bytesReceived += value.byteLength;
             
-            if (this.sourceBuffer) {
-              this.queue.push(value);
-              this._processQueue();
+            this.queue.push(value);
+            this._ensureSourceBuffer();
+            this._processQueue();
 
-              // Trigger first-frame callback and eagerly play
-              if (!this._firstFrame) {
-                this._firstFrame = true;
-                if (firstDataTimer) { clearTimeout(firstDataTimer); firstDataTimer = null; }
-                this.video.play().catch(() => {});
-                // Defer freeze-frame removal until video actually renders
-                this._scheduleFreezeRemoval();
-                if (this.onFirstFrame) this.onFirstFrame();
-              }
+            // Trigger first-frame callback and eagerly play
+            if (this.sourceBuffer && !this._firstFrame) {
+              this._firstFrame = true;
+              if (firstDataTimer) { clearTimeout(firstDataTimer); firstDataTimer = null; }
+              this.video.play().catch(() => {});
+              // Defer freeze-frame removal until video actually renders
+              this._scheduleFreezeRemoval();
+              if (this.onFirstFrame) this.onFirstFrame();
             }
           }
         }
@@ -749,6 +777,11 @@ class StageView {
         if (statusEl) {
           statusEl.classList.remove("offline", "reconnecting");
         }
+      };
+
+      reader.onUnsupportedCodec = (name, codec) => {
+        const cam = this.cameras.find(c => c.id === camId);
+        this.showToast(`${cam ? cam.name : camId}: ${name} (${codec}) is not supported by this PC's video decoder`, 'error');
       };
 
       // No onError handler — transient MSE/stream errors are auto-recovered

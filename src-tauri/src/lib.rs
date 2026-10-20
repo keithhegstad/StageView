@@ -377,6 +377,12 @@ fn count_samples_in_moof(moof_data: &[u8]) -> u64 {
     total.max(1) // always count at least 1 to avoid stalling on malformed boxes
 }
 
+/// Human-readable codec for the health panel, from the init segment's config box.
+fn codec_label(init: &[u8]) -> &'static str {
+    let has = |tag: &[u8]| init.windows(4).any(|w| w == tag);
+    if has(b"hvcC") { "H.265 (copy)" } else if has(b"avcC") { "H.264 (copy)" } else { "unknown (copy)" }
+}
+
 /// RAII guard that calls an abort closure when dropped.
 /// Ensures background tasks (health monitoring, stderr capture) are cancelled
 /// even when the parent task is externally aborted via JoinHandle::abort(),
@@ -634,7 +640,7 @@ async fn try_stream_camera(
                 last_frame_at: 0,
                 uptime_secs: 0,
                 resolution: None,
-                codec: "H264 (copy)".to_string(),
+                codec: "detecting…".to_string(),
             });
         }
     }
@@ -681,6 +687,10 @@ async fn try_stream_camera(
 
             let uptime = start_time.elapsed().as_secs().max(1);
 
+            let codec = health_app.state::<AppState>().stream_health.lock().ok()
+                .and_then(|h| h.get(&health_camera_id).map(|e| e.codec.clone()))
+                .unwrap_or_else(|| "unknown (copy)".to_string());
+
             let health = StreamHealth {
                 camera_id: health_camera_id.clone(),
                 fps,
@@ -690,7 +700,7 @@ async fn try_stream_camera(
                 last_frame_at: health_last_frame_at.load(Ordering::Relaxed),
                 uptime_secs: uptime,
                 resolution: None,
-                codec: "H264 (copy)".to_string(),
+                codec,
             };
 
             // Access state through app handle
@@ -856,6 +866,12 @@ async fn process_fmp4_stream(
                     // Cache initialization segment for late-connecting clients
                     if let Ok(mut cache) = state.init_segments.lock() {
                         cache.insert(camera_id.to_string(), init_segment.clone());
+                    }
+
+                    if let Ok(mut health) = state.stream_health.lock() {
+                        if let Some(entry) = health.get_mut(camera_id) {
+                            entry.codec = codec_label(&init_segment).to_string();
+                        }
                     }
                     
                     // Broadcast combined init segment using pre-cloned sender
@@ -1696,5 +1712,12 @@ mod tests {
     fn config_without_api_token_still_loads() {
         let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
         assert_eq!(cfg.api_token, "");
+    }
+
+    #[test]
+    fn codec_label_from_init_segment() {
+        assert_eq!(codec_label(b"....ftypisom....avc1....avcC\x01\x64"), "H.264 (copy)");
+        assert_eq!(codec_label(b"....ftypisom....hev1....hvcC\x01\x01"), "H.265 (copy)");
+        assert_eq!(codec_label(b"....ftypisom"), "unknown (copy)");
     }
 }
