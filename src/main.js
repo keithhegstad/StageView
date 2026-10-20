@@ -354,6 +354,18 @@ class Mp4StreamReader {
   switchUrl(url) {
     if (url === this.url) return;
     this.url = url;
+    if (!this.running) {
+      // Stopped (e.g. the previous stream's codec was unsupported): stop()
+      // detached everything, so rebuild from scratch for the new stream.
+      this.video.addEventListener('error', this._onVideoError);
+      this.video.addEventListener('waiting', this._onVideoWaiting);
+      this.sourceBuffer = null;
+      this._sourceOpen = false;
+      this.isUpdating = false;
+      this._initMediaSource();
+      this.start();
+      return;
+    }
     // A new stream has its own init segment, so rebuild the MSE pipeline.
     // _restart() shows the last frame on the freeze canvas until the new one renders.
     this._restart();
