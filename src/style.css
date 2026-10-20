@@ -150,6 +150,22 @@ button {
   50% { opacity: 0.5; }
 }
 
+.camera-tile .tile-message {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 80%;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  font-size: 14px;
+  text-align: center;
+  white-space: pre-line;
+  pointer-events: none;
+}
+
 .camera-tile .loading-spinner {
   position: absolute;
   top: 50%;

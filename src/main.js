@@ -764,6 +764,10 @@ class StageView {
     const spinner = tile.querySelector(".loading-spinner");
     const statusEl = tile.querySelector(".camera-status");
 
+    // The backend reports "online" as soon as FFmpeg delivers data, but this PC
+    // can't decode it — keep the tile showing the failure instead.
+    if (tile.dataset.unsupported) status = "offline";
+
     if (status === "online") {
       spinner.style.display = "none";
       statusEl.classList.remove("offline", "reconnecting");
@@ -800,6 +804,24 @@ class StageView {
     this.streamReaders.get(cam.id)?.switchUrl(this.streamUrl(streamId));
   }
 
+  /** Show a lasting "can't decode" message on a tile; survives later status events. */
+  markUnsupported(tile, name, codec) {
+    tile.dataset.unsupported = "1";
+    let msg = tile.querySelector(".tile-message");
+    if (!msg) {
+      msg = document.createElement("div");
+      msg.className = "tile-message";
+      tile.appendChild(msg);
+    }
+    msg.textContent = `${name} not supported on this PC\n${codec}`;
+    this.applyCameraStatus(tile, "offline");
+  }
+
+  clearUnsupported(tile) {
+    delete tile.dataset.unsupported;
+    tile.querySelector(".tile-message")?.remove();
+  }
+
   bindTileEvents(grid) {
     // Stop any existing stream readers before creating new ones
     this._stopAllReaders();
@@ -822,6 +844,7 @@ class StageView {
       
       reader.onFirstFrame = () => {
         video.classList.add("has-frame");
+        this.clearUnsupported(tile);
         const spinner = tile.querySelector(".loading-spinner");
         if (spinner) spinner.style.display = "none";
         const statusEl = tile.querySelector(".camera-status");
@@ -831,6 +854,7 @@ class StageView {
       };
 
       reader.onUnsupportedCodec = (name, codec) => {
+        this.markUnsupported(tile, name, codec);
         this.showToast(`${cam.name}: ${name} (${codec}) is not supported by this PC's video decoder`, 'error');
       };
 
