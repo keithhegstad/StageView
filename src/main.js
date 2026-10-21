@@ -577,7 +577,7 @@ class StageView {
     this._isIdle = false;
     this._pendingUpdate = null; // cached update object from plugin-updater
     this._updatePromptTimer = null; // 1 s tick that closes the update prompt after 10 minutes
-    this._curtainTimer = null;      // 1 s tick that closes the curtain call by itself
+    this._celebrationTimer = null;      // 1 s tick that closes the celebration by itself
     this.init();
   }
 
@@ -719,7 +719,7 @@ class StageView {
     document.getElementById('update-overlay').addEventListener('click', () => this.closeUpdateModal());
     document.getElementById('update-later-btn').addEventListener('click', () => this.closeUpdateModal());
     document.getElementById('update-now-btn').addEventListener('click', () => this.installUpdate());
-    document.getElementById('curtain-close-btn').addEventListener('click', () => this.closeCurtainCall());
+    document.getElementById('celebration-close-btn').addEventListener('click', () => this.closeCelebration());
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -1812,20 +1812,32 @@ class StageView {
     const lastSeen = config.last_seen_version || '';
     if (lastSeen === this.appVersion) return;
 
-    if (shouldCelebrate(lastSeen, this.appVersion, (config.cameras || []).length > 0)) {
-      this.showCurtainCall(this.appVersion, lastSeen, changesSince(CHANGELOG, lastSeen, this.appVersion));
+    // A PC that has been set up before has been upgraded, not freshly installed.
+    // Cameras alone are too narrow a test: a screen can be mid-setup, or have had
+    // its last camera removed, and the celebration would be lost for good.
+    const configured = hasPriorSetup(config);
+    const celebrate = shouldCelebrate(lastSeen, this.appVersion, configured);
+    console.info(`[update] version ${this.appVersion}, last seen ${lastSeen || '(none)'},`
+      + ` configured ${configured}: ${celebrate ? 'celebrating' : 'no celebration'}`);
+
+    if (celebrate) {
+      this.showCelebration(this.appVersion, lastSeen, changesSince(CHANGELOG, lastSeen, this.appVersion));
     }
-    await this.serializedConfigSave((cfg) => { cfg.last_seen_version = this.appVersion; return cfg; });
+    // Only spend the one chance when it was taken, or when this really is a
+    // fresh install. Otherwise leave the marker be and try again next launch.
+    if (celebrate || !configured) {
+      await this.serializedConfigSave((cfg) => { cfg.last_seen_version = this.appVersion; return cfg; });
+    }
   }
 
-  showCurtainCall(version, fromVersion, entries) {
-    const root = document.getElementById('curtain-call');
-    document.getElementById('curtain-version').textContent = version;
-    document.getElementById('curtain-lede').textContent = fromVersion
+  showCelebration(version, fromVersion, entries) {
+    const root = document.getElementById('update-celebration');
+    document.getElementById('celebration-version').textContent = version;
+    document.getElementById('celebration-lede').textContent = fromVersion
       ? `Updated from ${fromVersion}. Here's what changed.`
       : `Here's what changed in this version.`;
     const multi = entries.length > 1;
-    document.getElementById('curtain-changes').innerHTML = entries.map(e => `
+    document.getElementById('celebration-changes').innerHTML = entries.map(e => `
       <div class="change-group">
         ${multi ? `<h3>${escapeHtml(e.version)}</h3>` : ''}
         <dl class="change-list">${this.changeListHTML(e.changes)}</dl>
@@ -1833,39 +1845,47 @@ class StageView {
 
     root.classList.remove('hidden', 'leaving');
     requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add('open')));
-    // Confetti fires as the curtains part
-    setTimeout(() => fireConfetti(document.getElementById('confetti')), 450);
+    // Confetti springs from the panel as it settles
+    setTimeout(() => {
+      const canvas = document.getElementById('confetti');
+      const panel = root.querySelector('.celebration-panel');
+      const c = canvas.getBoundingClientRect();
+      const p = panel.getBoundingClientRect();
+      fireConfetti(canvas, {
+        origin: { left: p.left - c.left, right: p.right - c.left, top: p.top - c.top, width: p.width },
+      });
+    }, 260);
 
     // Unattended screens: step aside after 60 s, or on any key
-    clearInterval(this._curtainTimer);
+    clearInterval(this._celebrationTimer);
     const total = 60000;
     const deadline = Date.now() + total;
-    const fill = document.getElementById('curtain-timeout-fill');
-    const text = document.getElementById('curtain-timeout-text');
+    const fill = document.getElementById('celebration-timeout-fill');
+    const text = document.getElementById('celebration-timeout-text');
     const tick = () => {
       const left = Math.max(0, deadline - Date.now());
       fill.style.transform = `scaleX(${left / total})`;
       text.textContent = `Closes by itself in ${Math.ceil(left / 1000)} s`;
-      if (left === 0) this.closeCurtainCall();
+      if (left === 0) this.closeCelebration();
     };
     tick();
-    this._curtainTimer = setInterval(tick, 1000);
+    this._celebrationTimer = setInterval(tick, 1000);
 
-    this._curtainKey = (e) => {
+    this._celebrationKey = (e) => {
       e.preventDefault();
       e.stopImmediatePropagation(); // don't also switch cameras with this key
-      this.closeCurtainCall();
+      this.closeCelebration();
     };
-    window.addEventListener('keydown', this._curtainKey, { capture: true, once: true });
-    document.getElementById('curtain-close-btn').focus({ preventScroll: true });
+    window.addEventListener('keydown', this._celebrationKey, { capture: true, once: true });
+    document.getElementById('celebration-close-btn').focus({ preventScroll: true });
   }
 
-  closeCurtainCall() {
-    const root = document.getElementById('curtain-call');
+  closeCelebration() {
+    const root = document.getElementById('update-celebration');
     if (root.classList.contains('hidden')) return;
-    clearInterval(this._curtainTimer);
-    this._curtainTimer = null;
-    if (this._curtainKey) window.removeEventListener('keydown', this._curtainKey, { capture: true });
+    clearInterval(this._celebrationTimer);
+    this._celebrationTimer = null;
+    if (this._celebrationKey) window.removeEventListener('keydown', this._celebrationKey, { capture: true });
     root.classList.add('leaving');
     setTimeout(() => root.classList.add('hidden'), 400);
   }

@@ -207,22 +207,19 @@
     </div>
   </div>
 
-  <!-- First launch after an update: the curtains part on what changed -->
-  <div id="curtain-call" class="hidden" role="dialog" aria-modal="true" aria-labelledby="curtain-title">
+  <!-- First launch after an update: confetti springs from the panel -->
+  <div id="update-celebration" class="hidden" role="dialog" aria-modal="true" aria-labelledby="celebration-title">
     <canvas id="confetti" aria-hidden="true"></canvas>
-    <div class="curtain-stage">
-      <h2 id="curtain-title">StageView <span id="curtain-version"></span></h2>
-      <p class="curtain-lede" id="curtain-lede"></p>
-      <div class="curtain-changes" id="curtain-changes"></div>
-      <div class="curtain-footer">
-        <button class="btn-primary" id="curtain-close-btn">Back to cameras</button>
-        <span class="curtain-timeout" id="curtain-timeout-text"></span>
+    <div class="celebration-panel">
+      <h2 id="celebration-title">StageView <span id="celebration-version"></span></h2>
+      <p class="celebration-lede" id="celebration-lede"></p>
+      <div class="celebration-changes" id="celebration-changes"></div>
+      <div class="celebration-footer">
+        <button class="btn-primary" id="celebration-close-btn">Back to cameras</button>
+        <span class="celebration-timeout" id="celebration-timeout-text"></span>
       </div>
-      <div class="curtain-timeout-bar" aria-hidden="true"><div class="curtain-timeout-fill" id="curtain-timeout-fill"></div></div>
+      <div class="celebration-timeout-bar" aria-hidden="true"><div class="celebration-timeout-fill" id="celebration-timeout-fill"></div></div>
     </div>
-    <div class="curtain curtain-left" aria-hidden="true"></div>
-    <div class="curtain curtain-right" aria-hidden="true"></div>
-    <div class="valance curtain-valance" aria-hidden="true"></div>
   </div>
 
   <script src="changelog.js"></script>

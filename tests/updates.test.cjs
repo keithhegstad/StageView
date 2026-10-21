@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   UPDATE_CHECK_INTERVAL_MS, UPDATE_PROMPT_TIMEOUT_MS,
-  isUpdateCheckDue, compareVersions, changesSince,
+  isUpdateCheckDue, compareVersions, changesSince, hasPriorSetup,
   parseReleaseNotes, releaseNotesMarkdown, shouldCelebrate,
 } = require('../src/updates.js');
 const { CHANGELOG } = require('../src/changelog.js');
@@ -74,10 +74,24 @@ test('celebrate after an update, not on a fresh install or a plain restart', () 
   assert.strictEqual(shouldCelebrate('1.2.1', '1.3.0', true), true);
   assert.strictEqual(shouldCelebrate('1.3.0', '1.3.0', true), false);
   assert.strictEqual(shouldCelebrate('1.4.0', '1.3.0', true), false, 'downgrade');
-  // No record yet: an existing set-up (has cameras) was upgraded from a version
-  // before this feature; an empty one is a fresh install.
+  // No record yet: a PC that has been set up before was upgraded from a version
+  // before this feature; an untouched one is a fresh install.
   assert.strictEqual(shouldCelebrate('', '1.3.0', true), true);
   assert.strictEqual(shouldCelebrate('', '1.3.0', false), false);
+});
+
+test('a PC counts as set up from any trace of use, not just cameras', () => {
+  assert.strictEqual(hasPriorSetup({ cameras: [{ id: 'a' }] }), true);
+  assert.strictEqual(hasPriorSetup({ cameras: [], api_token: 'secret' }), true, 'token set');
+  assert.strictEqual(hasPriorSetup({ cameras: [], multicast_interface: '10.0.0.4' }), true, 'adapter chosen');
+  assert.strictEqual(hasPriorSetup({ cameras: [], last_update_check: 1 }), true, 'checked before');
+  assert.strictEqual(hasPriorSetup({ cameras: [], window_state: { width: 800 } }), true, 'window moved');
+
+  // A camera removed from a screen that is otherwise configured must not look
+  // like a fresh install, or the celebration is lost for good.
+  assert.strictEqual(hasPriorSetup({ cameras: [], api_token: '', window_state: {} }), false);
+  assert.strictEqual(hasPriorSetup({}), false);
+  assert.strictEqual(hasPriorSetup(null), false);
 });
 
 test('the changelog is newest first and every entry has changes', () => {

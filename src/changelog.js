@@ -1,5 +1,5 @@
 // ── What changed in each version ────────────────────────────────────────────
-// Newest first. Shown after an update (the curtain call) and published as the
+// Newest first. Shown after an update (the celebration) and published as the
 // GitHub release notes, which is what the update prompt shows on other PCs.
 // The release build fails if the version being released has no entry here.
 // Write for the people watching the screens: what they'll notice, in plain words.

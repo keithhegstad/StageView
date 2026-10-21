@@ -1153,9 +1153,9 @@ select option {
 }
 
 /* ── Update moments ───────────────────────────────────────────────────────────
-   The one place the interface celebrates. The motif is the house curtain:
-   velvet with a gold fringe, as on the stage of the venue these cameras watch.
-   Velvet and gold appear only here; everywhere else colour still means state. */
+   The one place the interface celebrates: confetti springs from the panel that
+   says what changed. Velvet and gold appear only here (the update prompt keeps
+   its valance); everywhere else colour still means state. */
 
 :root {
   --velvet-deep: #5a0e16;
@@ -1165,7 +1165,6 @@ select option {
 }
 
 /* Velvet: vertical folds, darker at the top and floor */
-.curtain,
 .valance {
   background:
     linear-gradient(to bottom, rgba(0, 0, 0, 0.45), transparent 22%, transparent 72%, rgba(0, 0, 0, 0.55)),
@@ -1353,16 +1352,16 @@ select option {
 }
 
 .update-timeout-fill,
-.curtain-timeout-fill {
+.celebration-timeout-fill {
   height: 100%;
   background: var(--muted);
   transform-origin: left;
   transition: transform 1s linear;
 }
 
-/* ── Curtain call: first launch after an update ── */
+/* ── Update celebration: first launch after an update ── */
 
-#curtain-call {
+#update-celebration {
   position: fixed;
   inset: 0;
   z-index: 3000;
@@ -1373,7 +1372,7 @@ select option {
   transition: opacity 400ms ease;
 }
 
-#curtain-call.leaving {
+#update-celebration.leaving {
   opacity: 0;
 }
 
@@ -1386,31 +1385,8 @@ select option {
   pointer-events: none;
 }
 
-.curtain {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  z-index: 2;
-  width: 50.5%;
-  transition: transform 1300ms cubic-bezier(0.65, 0, 0.25, 1);
-}
 
-.curtain-left  { left: 0;  box-shadow: inset -24px 0 30px -18px rgba(0, 0, 0, 0.7); }
-.curtain-right { right: 0; box-shadow: inset 24px 0 30px -18px rgba(0, 0, 0, 0.7); }
-
-#curtain-call.open .curtain-left  { transform: translateX(-100%); }
-#curtain-call.open .curtain-right { transform: translateX(100%); }
-
-.curtain-valance {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 3;
-  height: 44px;
-}
-
-.curtain-stage {
+.celebration-panel {
   position: relative;
   z-index: 1;
   display: flex;
@@ -1425,15 +1401,15 @@ select option {
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7);
   opacity: 0;
   transform: translateY(10px);
-  transition: opacity 500ms ease 450ms, transform 600ms var(--ease) 450ms;
+  transition: opacity 320ms ease, transform 420ms var(--ease);
 }
 
-#curtain-call.open .curtain-stage {
+#update-celebration.open .celebration-panel {
   opacity: 1;
   transform: none;
 }
 
-#curtain-title {
+#celebration-title {
   font-size: clamp(40px, 4.6vw, 60px);
   font-weight: 700;
   font-stretch: semi-condensed;
@@ -1444,7 +1420,7 @@ select option {
 }
 
 /* Heading and button stay put; only the list of changes scrolls */
-.curtain-changes {
+.celebration-changes {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -1452,13 +1428,13 @@ select option {
   padding-right: 20px;
 }
 
-.curtain-lede {
+.celebration-lede {
   margin: 12px 0 26px;
   font-size: var(--step-1);
   color: var(--muted);
 }
 
-.curtain-footer {
+.celebration-footer {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -1468,13 +1444,13 @@ select option {
   padding-bottom: 22px;
 }
 
-.curtain-timeout {
+.celebration-timeout {
   font-size: var(--step--1);
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
 
-.curtain-timeout-bar {
+.celebration-timeout-bar {
   flex-shrink: 0;
   height: 2px;
   margin: 0 -44px;
@@ -1482,10 +1458,9 @@ select option {
   overflow: hidden;
 }
 
-/* Reduced motion: no curtains moving, no confetti; the changes are simply there */
+/* Reduced motion: no confetti; the changes are simply there */
 @media (prefers-reduced-motion: reduce) {
-  .curtain { display: none; }
-  .curtain-stage { opacity: 1; transform: none; }
+  .celebration-panel { opacity: 1; transform: none; }
 }
 
 /* ── Pixel refresh (burn-in protection in solo mode) ──────────────────────── */

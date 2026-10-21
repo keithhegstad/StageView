@@ -1,12 +1,17 @@
-// ── Stage confetti ──────────────────────────────────────────────────────────
-// Two confetti cannons fire from the bottom corners of the stage, as at a
-// premiere. Paper, gold, silver and velvet pieces tumble edge-on as they fall.
-// Draws on the given canvas, then clears it and resolves. Nothing is drawn when
-// the viewer has asked for reduced motion.
+// ── Update confetti ─────────────────────────────────────────────────────────
+// Confetti springs from the panel that says what changed: a fan along its top
+// edge, going straight up at the middle and thrown further out towards each
+// end, so the paper bursts out of the window itself. Paper, gold, silver and
+// red pieces tumble edge-on as they fall. Draws on the given canvas, then
+// clears it and resolves. Nothing is drawn when the viewer has asked for
+// reduced motion.
+//
+// `origin` is the panel's rect in canvas coordinates. Without one the fan
+// spans the width of the canvas floor.
 
 const CONFETTI_COLORS = ['#e9e6df', '#d9a441', '#c8ccd2', '#a3242f', '#d9a441'];
 
-function fireConfetti(canvas, { durationMs = 4200, perCannon = 90 } = {}) {
+function fireConfetti(canvas, { durationMs = 4200, perVolley = 110, origin = null } = {}) {
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return Promise.resolve();
 
   const ctx = canvas.getContext('2d');
@@ -21,16 +26,23 @@ function fireConfetti(canvas, { durationMs = 4200, perCannon = 90 } = {}) {
   const scale = Math.max(0.7, Math.min(1.6, h / 900)); // bigger screens get a bigger throw
   const pieces = [];
 
-  const volley = (fromLeft, delay) => {
-    for (let i = 0; i < perCannon; i++) {
-      // Straight up, tilted in towards centre stage, with some spread
-      const tilt = rand(0.15, 0.55);
-      const angle = -Math.PI / 2 + (fromLeft ? tilt : -tilt);
-      const speed = rand(13, 23) * scale;
+  // The panel's top edge, or the full width of the canvas floor without one
+  const mouth = origin
+    ? { left: origin.left, width: origin.width, top: origin.top }
+    : { left: 0, width: w, top: h };
+
+  const volley = (delay) => {
+    for (let i = 0; i < perVolley; i++) {
+      // A fan along the top edge: straight up at the middle, thrown further out
+      // towards each end, so the paper bursts from the window rather than rising.
+      const across = Math.random();
+      const fromCentre = (across - 0.5) * 2; // -1 at the left end, 1 at the right
+      const angle = -Math.PI / 2 + fromCentre * rand(0.35, 1.0);
+      const speed = rand(12, 24) * scale * (0.75 + Math.abs(fromCentre) * 0.5);
       const strip = Math.random() < 0.25;
       pieces.push({
-        x: fromLeft ? rand(-10, w * 0.04) : rand(w * 0.96, w + 10),
-        y: h + rand(0, 20),
+        x: mouth.left + across * mouth.width,
+        y: mouth.top + rand(-8, 10),
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         w: strip ? rand(3, 4) : rand(7, 11),
@@ -45,10 +57,9 @@ function fireConfetti(canvas, { durationMs = 4200, perCannon = 90 } = {}) {
       });
     }
   };
-  volley(true, 0);
-  volley(false, 0);
-  volley(true, 320);
-  volley(false, 380);
+  volley(0);
+  volley(90);
+  volley(340);
 
   return new Promise((resolve) => {
     const start = performance.now();

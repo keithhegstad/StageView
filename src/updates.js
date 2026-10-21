@@ -1,5 +1,5 @@
 // ── Update schedule, versions and release notes ─────────────────────────────
-// Pure helpers behind the update prompt and the post-update curtain call, kept
+// Pure helpers behind the update prompt and the post-update celebration, kept
 // free of the DOM so they can be tested. The release build uses
 // releaseNotesMarkdown() to turn src/changelog.js into the GitHub release notes,
 // which the updater hands back to the app as `update.body`.
@@ -57,19 +57,33 @@ function parseReleaseNotes(body) {
 }
 
 /**
- * Show the curtain call when this version is newer than the last one this PC ran.
- * With no record (versions before this feature never saved one), an existing
- * set-up with cameras counts as upgraded; an empty one is a fresh install.
+ * True when this PC has been set up before: anything only a StageView that has
+ * been installed and used writes. A fresh install has none of it. This tells an
+ * upgrade from a first run on versions that never recorded a version number.
  */
-function shouldCelebrate(lastSeenVersion, currentVersion, hasCameras) {
-  if (!lastSeenVersion) return !!hasCameras;
+function hasPriorSetup(config) {
+  if (!config) return false;
+  if ((config.cameras || []).length > 0) return true;
+  if (config.api_token) return true;
+  if (config.multicast_interface) return true;
+  if (config.last_update_check) return true;
+  return Object.keys(config.window_state || {}).length > 0;
+}
+
+/**
+ * Celebrate when this version is newer than the last one this PC ran. With no
+ * record (versions before this feature never saved one), a PC that has been set
+ * up before counts as upgraded; an untouched one is a fresh install.
+ */
+function shouldCelebrate(lastSeenVersion, currentVersion, configured) {
+  if (!lastSeenVersion) return !!configured;
   return compareVersions(currentVersion, lastSeenVersion) > 0;
 }
 
 if (typeof module !== 'undefined') {
   module.exports = {
     UPDATE_CHECK_INTERVAL_MS, UPDATE_PROMPT_TIMEOUT_MS,
-    isUpdateCheckDue, compareVersions, changesSince,
+    isUpdateCheckDue, compareVersions, changesSince, hasPriorSetup,
     parseReleaseNotes, releaseNotesMarkdown, shouldCelebrate,
   };
 }
