@@ -178,22 +178,18 @@
     </div>
   </div>
 
-  <!-- Update Modal -->
+  <!-- Update available: a curtain valance over the prompt; closes itself after 10 minutes -->
   <div id="update-overlay" class="hidden"></div>
-  <div id="update-modal" class="hidden">
-    <div class="update-modal-header">
-      <h2>Update available</h2>
-      <button class="close-btn" id="update-close-btn" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
-    </div>
+  <div id="update-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="update-title">
+    <div class="valance" aria-hidden="true"></div>
+    <button class="close-btn update-close" id="update-close-btn" aria-label="Close and remind me tomorrow"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
     <div class="update-modal-body">
-      <div class="update-version-info">
-        <span class="update-version-current" id="update-current-ver"></span>
-        <svg class="update-arrow" viewBox="0 0 24 24" fill="none" width="20" height="20">
-          <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="update-version-new" id="update-new-ver"></span>
+      <h2 id="update-title">StageView <span id="update-new-ver"></span> is ready</h2>
+      <p class="update-lede">You're on <span id="update-current-ver"></span>. Installing takes about a minute and the cameras come back by themselves.</p>
+      <div class="change-group" id="update-changes-wrap">
+        <h3>What's new</h3>
+        <dl class="change-list" id="update-changelog"></dl>
       </div>
-      <div class="update-changelog" id="update-changelog"></div>
       <div class="update-progress hidden" id="update-progress">
         <div class="update-progress-bar">
           <div class="update-progress-fill" id="update-progress-fill"></div>
@@ -202,11 +198,36 @@
       </div>
     </div>
     <div class="update-modal-footer" id="update-footer">
-      <button class="btn-secondary update-later-btn" id="update-later-btn">Later</button>
-      <button class="btn-primary update-now-btn" id="update-now-btn">Install update</button>
+      <button class="btn-secondary" id="update-later-btn">Remind me tomorrow</button>
+      <button class="btn-primary" id="update-now-btn">Install update</button>
+    </div>
+    <div class="update-timeout" id="update-timeout" aria-live="off">
+      <div class="update-timeout-bar"><div class="update-timeout-fill" id="update-timeout-fill"></div></div>
+      <span id="update-timeout-text"></span>
     </div>
   </div>
 
+  <!-- First launch after an update: the curtains part on what changed -->
+  <div id="curtain-call" class="hidden" role="dialog" aria-modal="true" aria-labelledby="curtain-title">
+    <canvas id="confetti" aria-hidden="true"></canvas>
+    <div class="curtain-stage">
+      <h2 id="curtain-title">StageView <span id="curtain-version"></span></h2>
+      <p class="curtain-lede" id="curtain-lede"></p>
+      <div class="curtain-changes" id="curtain-changes"></div>
+      <div class="curtain-footer">
+        <button class="btn-primary" id="curtain-close-btn">Back to cameras</button>
+        <span class="curtain-timeout" id="curtain-timeout-text"></span>
+      </div>
+      <div class="curtain-timeout-bar" aria-hidden="true"><div class="curtain-timeout-fill" id="curtain-timeout-fill"></div></div>
+    </div>
+    <div class="curtain curtain-left" aria-hidden="true"></div>
+    <div class="curtain curtain-right" aria-hidden="true"></div>
+    <div class="valance curtain-valance" aria-hidden="true"></div>
+  </div>
+
+  <script src="changelog.js"></script>
+  <script src="updates.js"></script>
+  <script src="confetti.js"></script>
   <script src="codec.js"></script>
   <script src="streams.js"></script>
   <script src="healthtrace.js"></script>

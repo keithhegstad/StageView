@@ -57,6 +57,12 @@ pub struct AppConfig {
     /// (the adapter carrying the default route).
     #[serde(default)]
     pub multicast_interface: String,
+    /// When StageView last looked for an update (Unix ms); checks run once a day.
+    #[serde(default)]
+    pub last_update_check: u64,
+    /// The version this PC last ran, so the first launch after an update can show what changed.
+    #[serde(default)]
+    pub last_seen_version: String,
     #[serde(default)]
     pub window_state: WindowState,
 }
@@ -74,6 +80,8 @@ impl Default for AppConfig {
             api_port: 8090,
             api_token: String::new(),
             multicast_interface: String::new(),
+            last_update_check: 0,
+            last_seen_version: String::new(),
             window_state: WindowState::default(),
         }
     }
@@ -2005,5 +2013,12 @@ mod tests {
     fn config_without_multicast_adapter_still_loads() {
         let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
         assert_eq!(cfg.multicast_interface, "");
+    }
+
+    #[test]
+    fn config_without_update_fields_still_loads() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
+        assert_eq!(cfg.last_update_check, 0);
+        assert_eq!(cfg.last_seen_version, "");
     }
 }

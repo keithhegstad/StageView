@@ -576,6 +576,8 @@ class StageView {
     this._idleTimer = null;
     this._isIdle = false;
     this._pendingUpdate = null; // cached update object from plugin-updater
+    this._updatePromptTimer = null; // 1 s tick that closes the update prompt after 10 minutes
+    this._curtainTimer = null;      // 1 s tick that closes the curtain call by itself
     this.init();
   }
 
@@ -717,6 +719,7 @@ class StageView {
     document.getElementById('update-overlay').addEventListener('click', () => this.closeUpdateModal());
     document.getElementById('update-later-btn').addEventListener('click', () => this.closeUpdateModal());
     document.getElementById('update-now-btn').addEventListener('click', () => this.installUpdate());
+    document.getElementById('curtain-close-btn').addEventListener('click', () => this.closeCurtainCall());
   }
 
   // ── Grid Rendering ─────────────────────────────────────────────────────
@@ -1441,13 +1444,25 @@ class StageView {
 
   async initUpdater() {
     try {
-      const ver = await getAppVersion();
+      this.appVersion = await getAppVersion();
       const versionEl = document.getElementById('current-version');
-      if (versionEl) versionEl.textContent = 'v' + ver;
+      if (versionEl) versionEl.textContent = 'v' + this.appVersion;
     } catch (_) {}
 
-    // Silent auto-check after 3 seconds
-    setTimeout(() => this.checkForUpdates(false), 3000);
+    await this.maybeCelebrateUpdate();
+
+    // Look for updates once a day. The last check is saved in the config, so a
+    // restart doesn't reset the day; the 15-minute tick only asks "is it time?".
+    setTimeout(() => this.autoUpdateCheck(), 3000);
+    setInterval(() => this.autoUpdateCheck(), 15 * 60 * 1000);
+  }
+
+  async autoUpdateCheck() {
+    try {
+      const config = await invoke('get_config');
+      if (!isUpdateCheckDue(config.last_update_check, Date.now())) return;
+    } catch (_) { /* config unreadable: check anyway */ }
+    await this.checkForUpdates(false);
   }
 
   async checkForUpdates(manual = false) {
@@ -1460,10 +1475,12 @@ class StageView {
     try {
       const { check } = window.__TAURI_PLUGIN_UPDATER__ || await import('@tauri-apps/plugin-updater');
       const update = await check();
+      // A finished check counts for the day, whether or not there was an update
+      await this.serializedConfigSave((cfg) => { cfg.last_update_check = Date.now(); return cfg; });
 
       if (update?.available) {
         this._pendingUpdate = update;
-        this.showUpdateModal(update);
+        if (document.getElementById('update-modal').classList.contains('hidden')) this.showUpdateModal(update);
       } else if (manual) {
         this.showToast('You\'re on the latest version', 'success');
       }
@@ -1490,15 +1507,20 @@ class StageView {
     const footer = document.getElementById('update-footer');
     const nowBtn = document.getElementById('update-now-btn');
 
-    curVer.textContent = 'v' + (update.currentVersion || '');
-    newVer.textContent = 'v' + (update.version || '');
-    changelog.textContent = update.body || '';
+    curVer.textContent = update.currentVersion || '';
+    newVer.textContent = update.version || '';
+    const changes = parseReleaseNotes(update.body);
+    changelog.innerHTML = this.changeListHTML(changes);
+    document.getElementById('update-changes-wrap').classList.toggle('hidden', changes.length === 0);
 
     // Reset state
     progress.classList.add('hidden');
     footer.style.display = '';
     nowBtn.disabled = false;
-    nowBtn.textContent = 'Install update';
+    nowBtn.textContent = update.version ? `Install ${update.version}` : 'Install update';
+    document.getElementById('update-later-btn').style.display = '';
+    document.getElementById('update-close-btn').style.display = '';
+    this.startUpdatePromptTimeout();
 
     overlay.classList.remove('hidden');
     modal.classList.remove('hidden');
@@ -1508,7 +1530,35 @@ class StageView {
     });
   }
 
+  /** The prompt steps aside after 10 minutes; the next daily check asks again. */
+  startUpdatePromptTimeout() {
+    clearInterval(this._updatePromptTimer);
+    const deadline = Date.now() + UPDATE_PROMPT_TIMEOUT_MS;
+    const box = document.getElementById('update-timeout');
+    const fill = document.getElementById('update-timeout-fill');
+    const text = document.getElementById('update-timeout-text');
+    box.classList.remove('hidden');
+    const tick = () => {
+      const left = Math.max(0, deadline - Date.now());
+      const secs = Math.ceil(left / 1000);
+      fill.style.transform = `scaleX(${left / UPDATE_PROMPT_TIMEOUT_MS})`;
+      text.textContent = `Closes in ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} and asks again tomorrow`;
+      if (left === 0) this.closeUpdateModal();
+    };
+    tick();
+    this._updatePromptTimer = setInterval(tick, 1000);
+  }
+
+  /** <dt>/<dd> pairs for a list of { title, detail } changes. */
+  changeListHTML(changes) {
+    return changes.map(c =>
+      `<dt>${escapeHtml(c.title)}</dt><dd>${escapeHtml(c.detail)}</dd>`
+    ).join('');
+  }
+
   closeUpdateModal() {
+    clearInterval(this._updatePromptTimer);
+    this._updatePromptTimer = null;
     const overlay = document.getElementById('update-overlay');
     const modal = document.getElementById('update-modal');
 
@@ -1532,6 +1582,11 @@ class StageView {
     const progressFill = document.getElementById('update-progress-fill');
     const progressText = document.getElementById('update-progress-text');
 
+    // Installing: the prompt no longer closes by itself
+    clearInterval(this._updatePromptTimer);
+    this._updatePromptTimer = null;
+    document.getElementById('update-timeout').classList.add('hidden');
+
     // Disable buttons during download
     nowBtn.disabled = true;
     nowBtn.textContent = 'Downloading…';
@@ -1539,7 +1594,7 @@ class StageView {
     closeBtn.style.display = 'none';
     progress.classList.remove('hidden');
     progressFill.style.width = '0%';
-    progressText.textContent = 'Downloading...';
+    progressText.textContent = 'Downloading…';
 
     try {
       let downloaded = 0;
@@ -1746,6 +1801,73 @@ class StageView {
     } catch (err) {
       this.showToast("Failed to save settings: " + err, 'error');
     }
+  }
+
+  // ── Curtain call: first launch after an update ───────────────────────────
+
+  async maybeCelebrateUpdate() {
+    if (!this.appVersion) return;
+    let config;
+    try { config = await invoke('get_config'); } catch (_) { return; }
+    const lastSeen = config.last_seen_version || '';
+    if (lastSeen === this.appVersion) return;
+
+    if (shouldCelebrate(lastSeen, this.appVersion, (config.cameras || []).length > 0)) {
+      this.showCurtainCall(this.appVersion, lastSeen, changesSince(CHANGELOG, lastSeen, this.appVersion));
+    }
+    await this.serializedConfigSave((cfg) => { cfg.last_seen_version = this.appVersion; return cfg; });
+  }
+
+  showCurtainCall(version, fromVersion, entries) {
+    const root = document.getElementById('curtain-call');
+    document.getElementById('curtain-version').textContent = version;
+    document.getElementById('curtain-lede').textContent = fromVersion
+      ? `Updated from ${fromVersion}. Here's what changed.`
+      : `Here's what changed in this version.`;
+    const multi = entries.length > 1;
+    document.getElementById('curtain-changes').innerHTML = entries.map(e => `
+      <div class="change-group">
+        ${multi ? `<h3>${escapeHtml(e.version)}</h3>` : ''}
+        <dl class="change-list">${this.changeListHTML(e.changes)}</dl>
+      </div>`).join('');
+
+    root.classList.remove('hidden', 'leaving');
+    requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add('open')));
+    // Confetti fires as the curtains part
+    setTimeout(() => fireConfetti(document.getElementById('confetti')), 450);
+
+    // Unattended screens: step aside after 60 s, or on any key
+    clearInterval(this._curtainTimer);
+    const total = 60000;
+    const deadline = Date.now() + total;
+    const fill = document.getElementById('curtain-timeout-fill');
+    const text = document.getElementById('curtain-timeout-text');
+    const tick = () => {
+      const left = Math.max(0, deadline - Date.now());
+      fill.style.transform = `scaleX(${left / total})`;
+      text.textContent = `Closes by itself in ${Math.ceil(left / 1000)} s`;
+      if (left === 0) this.closeCurtainCall();
+    };
+    tick();
+    this._curtainTimer = setInterval(tick, 1000);
+
+    this._curtainKey = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation(); // don't also switch cameras with this key
+      this.closeCurtainCall();
+    };
+    window.addEventListener('keydown', this._curtainKey, { capture: true, once: true });
+    document.getElementById('curtain-close-btn').focus({ preventScroll: true });
+  }
+
+  closeCurtainCall() {
+    const root = document.getElementById('curtain-call');
+    if (root.classList.contains('hidden')) return;
+    clearInterval(this._curtainTimer);
+    this._curtainTimer = null;
+    if (this._curtainKey) window.removeEventListener('keydown', this._curtainKey, { capture: true });
+    root.classList.add('leaving');
+    setTimeout(() => root.classList.add('hidden'), 400);
   }
 
   // ── Serialized Config Save ──────────────────────────────────────────────
