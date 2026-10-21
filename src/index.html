@@ -16,19 +16,24 @@
 
   <!-- Empty State -->
   <div id="empty-state">
-    <div class="empty-icon">📷</div>
-    <h2>No cameras configured</h2>
-    <p>Open settings to add your first camera feed</p>
-    <button id="empty-add-camera">Add Camera</button>
+    <svg class="empty-grid" viewBox="0 0 64 40" fill="none" aria-hidden="true">
+      <rect x="0.5" y="0.5" width="31" height="19" />
+      <rect x="32.5" y="0.5" width="31" height="19" />
+      <rect x="0.5" y="20.5" width="31" height="19" />
+      <rect x="32.5" y="20.5" width="31" height="19" />
+    </svg>
+    <h2>No cameras yet</h2>
+    <p>Add a camera stream and it appears here.</p>
+    <button id="empty-add-camera" class="btn-primary">Add camera</button>
   </div>
 
   <!-- Toolbar (auto-hides) -->
   <div id="toolbar">
-    <span id="shuffle-timer" title="Time until next shuffle"></span>
+    <span class="toolbar-timer" title="Cameras swap positions to protect the screen from burn-in">Shuffle in <span id="shuffle-timer"></span></span>
 
     <!-- Camera selector -->
     <div class="toolbar-camera-group">
-      <button id="camera-menu-btn" title="Camera selector">
+      <button id="camera-menu-btn" title="Choose camera" aria-haspopup="menu">
         <svg id="camera-menu-icon-grid" class="toolbar-icon" viewBox="0 0 16 16" fill="none">
           <rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
           <rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
@@ -47,15 +52,8 @@
       <div id="camera-menu" class="camera-menu hidden">
         <div class="camera-menu-list">
           <button class="camera-menu-item grid-view-item" id="grid-view-btn">
-            <div class="camera-menu-item-icon">
-              <svg viewBox="0 0 16 16" fill="none">
-                <rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                <rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                <rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                <rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-              </svg>
-            </div>
-            <span class="camera-menu-item-label">Grid View</span>
+            <div class="camera-menu-item-icon">0</div>
+            <span class="camera-menu-item-label">All cameras</span>
             <svg class="camera-menu-check" viewBox="0 0 16 16" fill="none"><path d="M3 8.5L6.5 12L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <div class="camera-menu-divider"></div>
@@ -66,7 +64,7 @@
 
     <div class="toolbar-separator"></div>
 
-    <button id="fullscreen-btn" title="Toggle fullscreen">
+    <button id="fullscreen-btn" title="Fullscreen (F)" aria-label="Fullscreen">
       <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none">
         <path d="M2 5V3C2 2.44772 2.44772 2 3 2H5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         <path d="M11 2H13C13.5523 2 14 2.44772 14 3V5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -74,7 +72,7 @@
         <path d="M5 14H3C2.44772 14 2 13.5523 2 13V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
     </button>
-    <button id="settings-btn" title="Settings">
+    <button id="settings-btn" title="Settings" aria-label="Settings">
       <svg class="toolbar-icon" viewBox="0 0 24 24" fill="none">
         <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -87,7 +85,7 @@
   <div id="settings" class="hidden">
     <div class="settings-header">
       <h2>Settings</h2>
-      <button class="close-btn" id="settings-close-btn">✕</button>
+      <button class="close-btn" id="settings-close-btn" aria-label="Close settings"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
     </div>
 
     <div class="settings-body">
@@ -95,14 +93,14 @@
       <section>
         <h3>Cameras</h3>
         <div id="camera-list"></div>
-        <button class="add-btn" id="add-camera-btn">+ Add Camera</button>
+        <button class="add-btn" id="add-camera-btn">Add camera</button>
       </section>
 
       <!-- Shuffle Interval -->
       <section>
-        <h3>Burn-in Protection</h3>
-        <label>
-          Shuffle interval
+        <h3>Burn-in protection</h3>
+        <label class="field">
+          <span class="field-label">Swap camera positions every</span>
           <div class="interval-input">
             <input type="number" id="shuffle-interval-hours" min="0" max="24" value="0" />
             <span>hours</span>
@@ -110,14 +108,14 @@
             <span>minutes</span>
           </div>
         </label>
-        <p class="hint">Cameras swap positions to prevent screen burn-in</p>
+        <p class="hint">Moving each picture around keeps static parts of a scene from marking the screen.</p>
       </section>
 
       <!-- Display -->
       <section>
         <h3>Display</h3>
         <label class="toggle-row">
-          <span>Show status indicators</span>
+          <span>Show signal status on each camera</span>
           <input type="checkbox" id="show-status-dots" checked />
         </label>
         <label class="toggle-row">
@@ -128,43 +126,41 @@
 
       <!-- Network Control -->
       <section>
-        <h3>Network Control</h3>
-        <label>
-          API port
+        <h3>Remote control</h3>
+        <p class="hint section-intro">Stream Deck, Companion and the browser control panel talk to StageView over this port.</p>
+        <label class="field">
+          <span class="field-label">Port</span>
           <div class="interval-input">
             <input type="number" id="api-port" min="1024" max="65535" value="8090" />
+            <span>Takes effect after a restart</span>
           </div>
         </label>
-        <label>
-          API token
+        <label class="field">
+          <span class="field-label">Access token</span>
           <div class="interval-input">
-            <input type="text" id="api-token" placeholder="Leave empty for no authentication" autocomplete="off" spellcheck="false" />
-            <button type="button" id="generate-api-token" class="check-update-btn">Generate</button>
+            <input type="text" id="api-token" placeholder="Not set" autocomplete="off" spellcheck="false" />
+            <button type="button" id="generate-api-token" class="btn-secondary">Generate</button>
           </div>
         </label>
-        <p class="hint">When set, network calls need <code>?token=…</code>, e.g. <code>/api/grid?token=…</code>. Open the control panel once as <code>http://stageview.local:8090/?token=…</code>.</p>
-        <label>
-          Multicast adapter (IP)
+        <p class="hint">Without a token, anyone on the network can control this screen. With one, add <code>?token=…</code> to every call, and open the control panel once as <code>http://stageview.local:8090/?token=…</code>.</p>
+        <label class="field">
+          <span class="field-label">Camera network adapter</span>
           <div class="interval-input">
             <input type="text" id="multicast-interface" placeholder="Automatic" autocomplete="off" spellcheck="false" />
           </div>
         </label>
-        <p class="hint">This PC's IPv4 address on the camera network. Leave empty to use the adapter with the default gateway; set it if cameras show nothing while VPN, Hyper-V, WSL or Docker adapters are active.</p>
-        <p class="hint">HTTP API and browser control panel (requires restart to change port)</p>
-        <div class="api-endpoints">
-          <p class="hint" style="margin-top:12px;font-family:monospace">
-            GET / &mdash; control panel (open in any browser)<br>
-            GET /api/solo/1 &mdash; solo camera 1<br>
-            GET /api/solo/2 &mdash; solo camera 2<br>
-            GET /api/grid &mdash; return to grid<br>
-            GET /api/status &mdash; list cameras<br>
-            GET /api/fullscreen &mdash; fullscreen toggle<br>
-            GET /api/reload &mdash; reload config from disk
-          </p>
-          <p class="hint" style="margin-top:8px">
-            Control panel: <strong>http://stageview.local:8090/</strong>
-          </p>
-        </div>
+        <p class="hint">This PC's IP address on the camera network. Leave it on automatic unless cameras go blank while a VPN, Hyper-V, WSL or Docker adapter is active.</p>
+        <details class="api-reference">
+          <summary>API reference</summary>
+          <dl>
+            <dt><code>/</code></dt><dd>Control panel, opens in any browser</dd>
+            <dt><code>/api/solo/1</code></dt><dd>Show camera 1 alone (any camera number works)</dd>
+            <dt><code>/api/grid</code></dt><dd>Back to all cameras</dd>
+            <dt><code>/api/status</code></dt><dd>List cameras and their numbers</dd>
+            <dt><code>/api/fullscreen</code></dt><dd>Toggle fullscreen</dd>
+            <dt><code>/api/reload</code></dt><dd>Reload settings from disk</dd>
+          </dl>
+        </details>
       </section>
 
       <!-- Updates -->
@@ -172,13 +168,13 @@
         <h3>Version</h3>
         <div class="update-row">
           <span id="current-version">v1.0.0</span>
-          <button class="check-update-btn" id="check-update-btn">Check for Updates</button>
+          <button class="btn-secondary check-update-btn" id="check-update-btn">Check for updates</button>
         </div>
       </section>
     </div>
 
     <div class="settings-footer">
-      <button class="save-btn" id="save-settings-btn">Save & Apply</button>
+      <button class="btn-primary save-btn" id="save-settings-btn">Save and apply</button>
     </div>
   </div>
 
@@ -186,8 +182,8 @@
   <div id="update-overlay" class="hidden"></div>
   <div id="update-modal" class="hidden">
     <div class="update-modal-header">
-      <h2>Update Available</h2>
-      <button class="close-btn" id="update-close-btn">✕</button>
+      <h2>Update available</h2>
+      <button class="close-btn" id="update-close-btn" aria-label="Close"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
     </div>
     <div class="update-modal-body">
       <div class="update-version-info">
@@ -202,12 +198,12 @@
         <div class="update-progress-bar">
           <div class="update-progress-fill" id="update-progress-fill"></div>
         </div>
-        <span class="update-progress-text" id="update-progress-text">Downloading...</span>
+        <span class="update-progress-text" id="update-progress-text">Downloading…</span>
       </div>
     </div>
     <div class="update-modal-footer" id="update-footer">
-      <button class="update-later-btn" id="update-later-btn">Later</button>
-      <button class="update-now-btn" id="update-now-btn">Update Now</button>
+      <button class="btn-secondary update-later-btn" id="update-later-btn">Later</button>
+      <button class="btn-primary update-now-btn" id="update-now-btn">Install update</button>
     </div>
   </div>
 

@@ -757,7 +757,7 @@ class StageView {
         <div class="loading-spinner"></div>
         <video autoplay muted playsinline crossorigin="anonymous"></video>
         <div class="camera-status" style="${this.showStatusDots ? '' : 'display:none'}"></div>
-        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}">${escapeHtml(cam.name)}</div>
+        <div class="camera-label" style="${this.showCameraNames ? '' : 'display:none'}"><span class="camera-label-number">${idx + 1}</span><span class="camera-label-name">${escapeHtml(cam.name)}</span></div>
       </div>
     `;
   }
@@ -1306,13 +1306,13 @@ class StageView {
     // Create health section HTML — dot + name + fps only
     const healthHTML = `
       <div class="settings-section">
-        <h3>Stream Health</h3>
+        <h3>Stream health</h3>
         <div id="health-stats-container">
           ${this.cameras.map(cam => `
             <div class="health-row" data-camera-id="${cam.id}" data-health-state="unknown">
               <span class="health-dot"></span>
               <span class="health-row-name">${escapeHtml(cam.name)}</span>
-              <span class="health-row-stats"><span data-metric="fps">--</span> fps</span>
+              <span class="health-row-stats"><span data-metric="fps">--</span><span class="health-row-unit">fps</span></span>
             </div>
           `).join('')}
         </div>
@@ -1362,7 +1362,6 @@ class StageView {
     if (!container) {
       container = document.createElement('div');
       container.id = 'toast-container';
-      container.style.cssText = 'position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 9999; pointer-events: none;';
       document.body.appendChild(container);
     }
 
@@ -1402,7 +1401,7 @@ class StageView {
     const btn = document.getElementById('check-update-btn');
     if (btn) {
       btn.disabled = true;
-      btn.textContent = 'Checking...';
+      btn.textContent = 'Checking…';
     }
 
     try {
@@ -1423,7 +1422,7 @@ class StageView {
     } finally {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = 'Check for Updates';
+        btn.textContent = 'Check for updates';
       }
     }
   }
@@ -1446,7 +1445,7 @@ class StageView {
     progress.classList.add('hidden');
     footer.style.display = '';
     nowBtn.disabled = false;
-    nowBtn.textContent = 'Update Now';
+    nowBtn.textContent = 'Install update';
 
     overlay.classList.remove('hidden');
     modal.classList.remove('hidden');
@@ -1482,7 +1481,7 @@ class StageView {
 
     // Disable buttons during download
     nowBtn.disabled = true;
-    nowBtn.textContent = 'Downloading...';
+    nowBtn.textContent = 'Downloading…';
     laterBtn.style.display = 'none';
     closeBtn.style.display = 'none';
     progress.classList.remove('hidden');
@@ -1510,7 +1509,7 @@ class StageView {
             break;
           case 'Finished':
             progressFill.style.width = '100%';
-            progressText.textContent = 'Restarting...';
+            progressText.textContent = 'Restarting…';
             break;
         }
       });
@@ -1534,7 +1533,7 @@ class StageView {
     } catch (err) {
       console.error('Update install failed:', err);
       progressText.textContent = 'Update failed: ' + err;
-      nowBtn.textContent = 'Retry';
+      nowBtn.textContent = 'Try again';
       nowBtn.disabled = false;
       laterBtn.style.display = '';
       closeBtn.style.display = '';
@@ -1560,70 +1559,70 @@ class StageView {
     }, 300);
   }
 
+  /** One camera row in Settings. The number is the camera's key and API index. */
+  cameraEntryHTML(cam, i) {
+    const n = i + 1;
+    return `
+      <div class="camera-entry" data-index="${i}">
+        <span class="camera-entry-number" title="Press ${n} or call /api/solo/${n} to show this camera alone">${n}</span>
+        <div class="camera-entry-fields">
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" value="${escapeHtml(cam.name)}" data-field="name" placeholder="Foyer" />
+          </label>
+          <label class="field">
+            <span class="field-label">Stream URL</span>
+            <input type="text" value="${escapeHtml(cam.url)}" data-field="url" placeholder="rtp://224.1.2.4:4000" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">Grid stream URL <span class="field-optional">optional</span></span>
+            <input type="text" value="${escapeHtml(cam.grid_url || '')}" data-field="grid_url" placeholder="Empty: the grid shows the stream above" spellcheck="false" />
+          </label>
+        </div>
+        <button type="button" class="remove-btn" aria-label="Remove camera ${n}" title="Remove camera ${n}">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>`;
+  }
+
   renderCameraList() {
     const list = document.getElementById("camera-list");
+    this._bindCameraListOnce(list);
 
     if (this.cameras.length === 0) {
+      list.innerHTML = "";
       this.addCameraField();
       return;
     }
-
-    list.innerHTML = this.cameras
-      .map(
-        (cam, i) => {
-          return `
-      <div class="camera-entry" data-index="${i}">
-        <span class="api-index" title="API: /api/solo/${i + 1}">Camera ${i + 1}</span>
-        <input type="text" placeholder="Camera name" value="${escapeHtml(cam.name)}" data-field="name" />
-        <input type="text" placeholder="rtp://224.1.2.4:4000" value="${escapeHtml(cam.url)}" data-field="url" />
-        <input type="text" placeholder="Grid substream URL (optional, lower resolution)" value="${escapeHtml(cam.grid_url || '')}" data-field="grid_url" />
-        <button class="remove-btn" data-remove-index="${i}">✕</button>
-      </div>
-    `;
-        }
-      )
-      .join("");
-
-    // Attach remove handlers
-    list.querySelectorAll('[data-remove-index]').forEach(btn => {
-      btn.addEventListener('click', () => this.removeCameraField(parseInt(btn.dataset.removeIndex)));
-    });
+    list.innerHTML = this.cameras.map((cam, i) => this.cameraEntryHTML(cam, i)).join("");
   }
 
   addCameraField() {
     const list = document.getElementById("camera-list");
-    const index = list.children.length;
-    const entry = document.createElement("div");
-    entry.className = "camera-entry";
-    entry.dataset.index = index;
-    entry.innerHTML = `
-      <input type="text" placeholder="Camera name" value="" data-field="name" />
-      <input type="text" placeholder="rtp://224.1.2.4:4000" value="" data-field="url" />
-      <input type="text" placeholder="Grid substream URL (optional, lower resolution)" value="" data-field="grid_url" />
-      <button class="remove-btn">✕</button>
-    `;
-    entry.querySelector('.remove-btn').addEventListener('click', () => this.removeCameraField(index));
-    list.appendChild(entry);
+    this._bindCameraListOnce(list);
+    list.insertAdjacentHTML("beforeend", this.cameraEntryHTML({ name: "", url: "", grid_url: "" }, list.children.length));
+    list.lastElementChild.querySelector('[data-field="name"]').focus();
   }
 
-  removeCameraField(index) {
-    const list = document.getElementById("camera-list");
-    const entries = list.querySelectorAll(".camera-entry");
-    if (entries[index]) {
-      entries[index].remove();
-      // Re-index remaining entries to prevent stale closure indices
-      list.querySelectorAll('.camera-entry').forEach((entry, i) => {
+  /** Remove buttons are handled by one delegated listener, so row order never goes stale. */
+  _bindCameraListOnce(list) {
+    if (list.dataset.bound) return;
+    list.dataset.bound = "1";
+    list.addEventListener("click", (e) => {
+      const btn = e.target.closest(".remove-btn");
+      if (!btn) return;
+      btn.closest(".camera-entry").remove();
+      list.querySelectorAll(".camera-entry").forEach((entry, i) => {
+        const n = i + 1;
         entry.dataset.index = i;
-        const removeBtn = entry.querySelector('[data-remove-index]');
-        if (removeBtn) removeBtn.dataset.removeIndex = i;
+        const num = entry.querySelector(".camera-entry-number");
+        num.textContent = n;
+        num.title = `Press ${n} or call /api/solo/${n} to show this camera alone`;
+        const rm = entry.querySelector(".remove-btn");
+        rm.setAttribute("aria-label", `Remove camera ${n}`);
+        rm.title = `Remove camera ${n}`;
       });
-      // Re-bind remove handlers with correct indices
-      list.querySelectorAll('[data-remove-index]').forEach(btn => {
-        const newBtn = btn.cloneNode(true);
-        btn.parentNode.replaceChild(newBtn, btn);
-        newBtn.addEventListener('click', () => this.removeCameraField(parseInt(newBtn.dataset.removeIndex)));
-      });
-    }
+    });
   }
 
   async saveSettings() {

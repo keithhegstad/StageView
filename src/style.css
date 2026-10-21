@@ -1,4 +1,8 @@
-/* ── Reset & Base ──────────────────────────────────────────────────────────── */
+/* ── StageView ────────────────────────────────────────────────────────────────
+   A multiviewer for venue cameras. The picture is the product: chrome stays
+   flat and monochrome, and colour is reserved for signal state.
+   Type is Bahnschrift (DIN 1451, shipped with Windows), the lettering of
+   venue signage and equipment panels. */
 
 *, *::before, *::after {
   margin: 0;
@@ -6,55 +10,91 @@
   box-sizing: border-box;
 }
 
-body.cursor-hidden,
-body.cursor-hidden * {
-  cursor: none !important;
-}
-
 :root {
-  --bg: #0a0a0a;
-  --surface: #141414;
-  --surface-hover: #1e1e1e;
-  --border: #2a2a2a;
-  --text: #e5e5e5;
-  --text-dim: #888;
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --danger: #ef4444;
-  --radius: 8px;
-  --transition: 200ms ease;
+  /* Surfaces */
+  --black: #000000;          /* around and between tiles */
+  --graphite: #17191c;       /* toolbar, menus, settings */
+  --well: #101215;           /* input fields, sunk into graphite */
+  --rule: #2b2f35;           /* hairlines and borders */
+  --rule-strong: #3d424a;
+
+  /* Text */
+  --paper: #e9e6df;
+  --muted: #8a9098;
+  --faint: #5d636b;
+
+  /* Signal state: the only colours in the interface */
+  --signal-ok: #3fb76a;
+  --signal-wait: #f0a92b;
+  --signal-lost: #e5484d;
+
+  /* Type */
+  --font: "Bahnschrift", "DIN Alternate", "Barlow", "Segoe UI", system-ui, sans-serif;
+  --step--1: 12px;
+  --step-0: 14px;
+  --step-1: 16px;
+  --step-2: 21px;
+  --step-3: 24px;
+
+  --radius-control: 4px;
+  --radius-panel: 6px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 html, body {
   height: 100%;
   width: 100%;
-  margin: 0;
-  padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--step-0);
+  line-height: 1.45;
+  background: var(--black);
+  color: var(--paper);
   overflow: hidden;
   user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+body.cursor-hidden,
+body.cursor-hidden * {
+  cursor: none !important;
 }
 
 button {
   cursor: pointer;
-  font-family: inherit;
+  font: inherit;
+  color: inherit;
+  background: none;
   border: none;
-  outline: none;
 }
 
-/* ── Camera Grid ──────────────────────────────────────────────────────────── */
+input, select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--paper);
+  outline-offset: 2px;
+}
+
+code {
+  font-family: var(--font);
+  color: var(--paper);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ── Camera grid ──────────────────────────────────────────────────────────── */
 
 #grid {
-  display: grid;
-  gap: 2px;
-  width: 100%;
-  height: 100%;
-  background: var(--bg);
-  transition: grid-template var(--transition);
   position: absolute;
   inset: 0;
+  display: grid;
+  gap: 2px;
+  background: var(--black);
+  transition: grid-template 200ms var(--ease);
 }
 
 #grid:empty {
@@ -62,44 +102,35 @@ button {
 }
 
 .camera-tile {
+  /* Under-monitor label size follows the screen, so names stay legible from across a room */
+  --umd: clamp(12px, 1.15vw, 20px);
   position: relative;
-  background: var(--surface);
-  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
+  background: var(--black);
   cursor: default;
 }
 
+.camera-tile video,
 .camera-tile canvas {
   width: 100%;
   height: 100%;
   display: none;
   object-fit: cover;
+  background: var(--black);
 }
 
+.camera-tile video.has-frame,
 .camera-tile canvas.has-frame {
   display: block;
 }
 
-.camera-tile video {
-  width: 100%;
-  height: 100%;
-  display: none;
-  object-fit: cover;
-  background: var(--surface);
-}
-
-.camera-tile video.has-frame {
-  display: block;
-}
-
-/* Freeze-frame canvas: holds the last good video frame during MSE
-   pipeline restarts so the user never sees a black flash. */
+/* Holds the last good frame while the video pipeline restarts */
 .camera-tile .freeze-frame {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -108,60 +139,86 @@ button {
   pointer-events: none;
 }
 
+.camera-tile.solo {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+}
+
+.camera-tile.solo canvas {
+  object-fit: contain;
+}
+
+/* Under-monitor display: a solid slate flush to the corner, as on a broadcast multiviewer */
 .camera-tile .camera-label {
   position: absolute;
-  bottom: 0;
   left: 0;
-  right: 0;
-  padding: 6px 12px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: rgba(255, 255, 255, 0.85);
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  max-width: 100%;
+  padding: 0.38em 0.8em 0.42em calc(0.8em + 4px);
+  background: rgba(0, 0, 0, 0.78);
+  font-size: var(--umd);
+  line-height: 1.15;
   pointer-events: none;
 }
 
-.camera-tile .camera-status {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #22c55e;
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
-  transition: background var(--transition);
+.camera-label-number {
+  color: var(--muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 
-.camera-tile .camera-status.offline {
-  background: var(--danger);
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+.camera-label-name {
+  color: var(--paper);
+  font-weight: 600;
+  font-stretch: semi-condensed;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Signal bar on the label's leading edge: green, amber while reconnecting, red when lost */
+.camera-tile .camera-status {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 3;
+  width: 4px;
+  height: calc(var(--umd) * 1.95);
+  background: var(--signal-ok);
+  transition: background 200ms ease;
 }
 
 .camera-tile .camera-status.reconnecting {
-  background: orange;
-  box-shadow: 0 0 6px rgba(255, 165, 0, 0.5);
-  animation: pulse 1.5s infinite;
+  background: var(--signal-wait);
+  animation: signal-wait 1.6s ease-in-out infinite;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+.camera-tile .camera-status.offline {
+  background: var(--signal-lost);
 }
 
+@keyframes signal-wait {
+  50% { opacity: 0.35; }
+}
+
+/* Shown on the tile when this PC can't decode the camera's codec */
 .camera-tile .tile-message {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+  z-index: 2;
   max-width: 80%;
-  padding: 10px 16px;
-  border-radius: var(--radius);
-  background: rgba(0, 0, 0, 0.6);
-  color: var(--text);
-  font-size: 14px;
-  text-align: center;
+  padding: 12px 16px 12px 18px;
+  background: var(--graphite);
+  border-left: 3px solid var(--signal-lost);
+  color: var(--paper);
+  font-size: var(--step-0);
+  line-height: 1.5;
   white-space: pre-line;
   pointer-events: none;
 }
@@ -170,66 +227,120 @@ button {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  transform: translate(-50%, -50%);
   z-index: 2;
+  width: 28px;
+  height: 28px;
+  border: 1.5px solid rgba(233, 230, 223, 0.18);
+  border-top-color: var(--paper);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: spin 0.9s linear infinite;
 }
 
 @keyframes spin {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
   to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
-/* ── Empty State ──────────────────────────────────────────────────────────── */
+/* ── Empty state ──────────────────────────────────────────────────────────── */
 
 #empty-state {
   position: absolute;
   inset: 0;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  color: var(--text-dim);
-  z-index: 50;
+  text-align: center;
+  color: var(--muted);
 }
 
-#empty-state.hidden { display: none; }
+#empty-state.hidden {
+  display: none;
+}
 
-#empty-state .empty-icon {
-  font-size: 48px;
-  margin-bottom: 8px;
-  opacity: 0.6;
+#empty-state .empty-grid {
+  width: 96px;
+  margin-bottom: 28px;
+  stroke: var(--rule-strong);
+  stroke-width: 1;
 }
 
 #empty-state h2 {
-  font-size: 20px;
+  font-size: var(--step-3);
   font-weight: 600;
-  color: var(--text);
+  font-stretch: semi-condensed;
+  color: var(--paper);
+  margin-bottom: 6px;
 }
 
 #empty-state p {
-  font-size: 14px;
+  font-size: var(--step-0);
+  margin-bottom: 24px;
 }
 
-#empty-state button {
-  margin-top: 8px;
-  padding: 10px 24px;
-  background: var(--accent);
-  color: white;
-  border-radius: var(--radius);
-  font-size: 14px;
-  font-weight: 500;
-  transition: background var(--transition);
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+
+.btn-primary {
+  height: 36px;
+  padding: 0 18px;
+  background: var(--paper);
+  color: var(--black);
+  border-radius: var(--radius-control);
+  font-size: var(--step-0);
+  font-weight: 600;
+  transition: background 120ms ease;
 }
 
-#empty-state button:hover {
-  background: var(--accent-hover);
+.btn-primary:hover {
+  background: #ffffff;
+}
+
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  height: 32px;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  font-size: var(--step-0);
+  white-space: nowrap;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.btn-secondary:hover {
+  border-color: var(--muted);
+  background: rgba(233, 230, 223, 0.04);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.close-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  border-radius: var(--radius-control);
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.close-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.close-btn:hover {
+  color: var(--paper);
+  background: rgba(233, 230, 223, 0.06);
 }
 
 /* ── Toolbar ──────────────────────────────────────────────────────────────── */
@@ -238,20 +349,18 @@ button {
   position: fixed;
   top: 12px;
   right: 12px;
+  z-index: 100;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px;
-  background: rgba(12, 12, 12, 0.88);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
+  padding: 3px;
+  background: var(--graphite);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 300ms ease;
-  z-index: 100;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  transition: opacity 240ms ease;
 }
 
 #toolbar.visible {
@@ -266,36 +375,45 @@ button {
 }
 
 #toolbar > button {
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--text-dim);
-  border-radius: 7px;
-  font-size: 16px;
-  transition: all 150ms ease;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  border-radius: var(--radius-control);
+  transition: color 120ms ease, background 120ms ease;
 }
 
 #toolbar > button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
+  color: var(--paper);
+  background: rgba(233, 230, 223, 0.07);
 }
 
-#shuffle-timer {
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 0 6px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
+.toolbar-timer {
+  padding: 0 10px 0 8px;
+  color: var(--faint);
+  font-size: var(--step--1);
+  white-space: nowrap;
 }
 
-#shuffle-timer:empty {
+.toolbar-timer:has(#shuffle-timer:empty) {
   display: none;
 }
 
-/* ── Toolbar Camera Selector ──────────────────────────────────────────────── */
+#shuffle-timer {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--rule);
+  flex-shrink: 0;
+}
+
+/* ── Camera selector ──────────────────────────────────────────────────────── */
 
 .toolbar-camera-group {
   position: relative;
@@ -304,49 +422,32 @@ button {
 #camera-menu-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
-  width: auto !important;
-  height: 34px;
-  padding: 0 8px 0 10px;
-  background: transparent;
-  color: var(--text-dim);
-  border-radius: 7px;
-  transition: all 150ms ease;
+  gap: 7px;
+  height: 32px;
+  padding: 0 9px 0 10px;
+  color: var(--muted);
+  border-radius: var(--radius-control);
   white-space: nowrap;
+  transition: color 120ms ease, background 120ms ease;
 }
 
-#camera-menu-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
+#camera-menu-btn:hover,
+#camera-menu-btn.menu-open {
+  color: var(--paper);
+  background: rgba(233, 230, 223, 0.07);
 }
 
 #camera-menu-btn.active {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--accent);
-}
-
-#camera-menu-btn.active:hover {
-  background: rgba(59, 130, 246, 0.2);
-}
-
-.toolbar-chevron {
-  width: 8px;
-  height: 8px;
-  opacity: 0.5;
-  flex-shrink: 0;
-  transition: transform 150ms ease;
-}
-
-#camera-menu-btn.menu-open .toolbar-chevron {
-  transform: rotate(180deg);
+  color: var(--paper);
 }
 
 #camera-menu-label {
-  font-size: 12px;
-  font-weight: 500;
-  max-width: 120px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: var(--step-0);
+  font-weight: 600;
+  font-stretch: semi-condensed;
   line-height: 1;
 }
 
@@ -354,61 +455,44 @@ button {
   display: none;
 }
 
-.toolbar-separator {
-  width: 1px;
-  height: 18px;
-  background: rgba(255, 255, 255, 0.08);
-  margin: 0 2px;
+.toolbar-chevron {
+  width: 9px;
+  height: 9px;
+  opacity: 0.6;
   flex-shrink: 0;
+  transition: transform 150ms var(--ease);
 }
 
-/* ── Camera Dropdown Menu ─────────────────────────────────────────────────── */
+#camera-menu-btn.menu-open .toolbar-chevron {
+  transform: rotate(180deg);
+}
 
 .camera-menu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   right: 0;
-  width: 220px;
-  background: rgba(30, 30, 32, 0.98);
-  backdrop-filter: blur(40px) saturate(1.8);
-  -webkit-backdrop-filter: blur(40px) saturate(1.8);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.3),
-    inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
   z-index: 110;
-  transform-origin: top right;
+  width: 240px;
   padding: 4px;
-  box-sizing: border-box;
-  opacity: 1;
-  transform: scale(1) translateY(0);
-  transition: opacity 120ms ease, transform 120ms cubic-bezier(0.2, 0, 0, 1);
+  background: var(--graphite);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  transform-origin: top right;
 }
 
 .camera-menu.hidden {
   display: none;
-  opacity: 0;
-  transform: scale(0.96) translateY(-4px);
 }
 
 .camera-menu.menu-animating {
-  animation: menuSlideIn 140ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: menu-open 140ms var(--ease) forwards;
 }
 
-@keyframes menuSlideIn {
-  from {
-    opacity: 0;
-    transform: scale(0.96) translateY(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
+@keyframes menu-open {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-
-/* ── Menu Inner Container ── */
 
 .camera-menu-list {
   display: flex;
@@ -417,106 +501,63 @@ button {
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  scrollbar-color: var(--rule-strong) transparent;
 }
-
-.camera-menu-list::-webkit-scrollbar {
-  width: 4px;
-}
-
-.camera-menu-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.camera-menu-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-}
-
-.camera-menu-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.18);
-}
-
-/* ── Divider ── */
 
 .camera-menu-divider {
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
-  margin: 3px 8px;
+  margin: 4px 6px;
+  background: var(--rule);
 }
 
-/* ── Menu Item (shared by Grid View + each camera) ── */
+#camera-menu-cameras {
+  display: flex;
+  flex-direction: column;
+}
 
 .camera-menu-item {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 7px 8px;
-  margin: 0;
-  background: none;
-  color: rgba(255, 255, 255, 0.88);
-  border: none;
-  border-radius: 6px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 450;
-  line-height: 1;
-  cursor: pointer;
-  transition: background 80ms ease;
+  padding: 6px 8px;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: var(--step-0);
   text-align: left;
+  transition: background 80ms ease, color 80ms ease;
 }
 
 .camera-menu-item:hover {
-  background: rgba(255, 255, 255, 0.07);
+  color: var(--paper);
+  background: rgba(233, 230, 223, 0.06);
 }
 
-.camera-menu-item:active {
-  background: rgba(255, 255, 255, 0.04);
-  transform: scale(0.99);
-}
-
-/* Active / selected state */
 .camera-menu-item.active {
-  background: rgba(59, 130, 246, 0.14);
-  color: #6ea8fe;
+  color: var(--paper);
+  background: rgba(233, 230, 223, 0.09);
 }
 
-.camera-menu-item.active:hover {
-  background: rgba(59, 130, 246, 0.2);
-}
-
-/* ── Icon Badge (number or grid icon) ── */
-
+/* The camera's number key, drawn as a keycap: press it to show that camera alone */
 .camera-menu-item-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.07);
-  border-radius: 6px;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 11px;
-  font-weight: 600;
+  border: 1px solid var(--rule-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: var(--step--1);
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
 .camera-menu-item.active .camera-menu-item-icon {
-  background: rgba(59, 130, 246, 0.22);
-  color: #6ea8fe;
+  border-color: var(--paper);
+  color: var(--paper);
 }
-
-/* Grid View icon specifically */
-.camera-menu-item.grid-view-item .camera-menu-item-icon svg {
-  width: 14px;
-  height: 14px;
-  display: block;
-}
-
-/* ── Label ── */
 
 .camera-menu-item-label {
   flex: 1;
@@ -524,79 +565,66 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: inherit;
-  font: inherit;
-  line-height: 1;
+  font-weight: 600;
+  font-stretch: semi-condensed;
 }
-
-/* ── Checkmark ── */
 
 .camera-menu-check {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
   opacity: 0;
-  color: #6ea8fe;
-  transition: opacity 80ms ease;
+  color: var(--paper);
 }
 
 .camera-menu-item.active .camera-menu-check {
   opacity: 1;
 }
 
-/* ── Camera List Sub-container ── */
-
-#camera-menu-cameras {
-  display: flex;
-  flex-direction: column;
-}
-
-/* ── ffmpeg Warning ───────────────────────────────────────────────────────── */
+/* ── FFmpeg warning ───────────────────────────────────────────────────────── */
 
 #ffmpeg-warning {
   position: fixed;
-  bottom: 16px;
   left: 50%;
-  transform: translateX(-50%);
-  padding: 10px 20px;
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-size: 13px;
+  bottom: 16px;
+  z-index: 200;
   display: flex;
   align-items: center;
   gap: 12px;
-  z-index: 200;
-  backdrop-filter: blur(12px);
+  padding: 10px 14px 10px 16px;
+  transform: translateX(-50%);
+  background: var(--graphite);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--signal-lost);
+  border-radius: var(--radius-control);
+  color: var(--paper);
+  font-size: var(--step-0);
 }
 
 #ffmpeg-warning a {
-  color: var(--accent);
-  text-decoration: underline;
+  color: var(--paper);
+  text-underline-offset: 3px;
 }
 
 #ffmpeg-warning button {
-  background: none;
-  color: var(--text-dim);
-  font-size: 16px;
   padding: 2px 6px;
-  border-radius: 4px;
+  color: var(--muted);
+  border-radius: var(--radius-control);
 }
 
 #ffmpeg-warning button:hover {
-  color: var(--text);
+  color: var(--paper);
 }
 
-/* ── Settings Panel ───────────────────────────────────────────────────────── */
+/* ── Settings ─────────────────────────────────────────────────────────────── */
 
 #settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
   z-index: 900;
+  background: rgba(0, 0, 0, 0.55);
   opacity: 0;
-  transition: opacity 300ms ease;
+  transition: opacity 240ms ease;
 }
 
 #settings-overlay.visible {
@@ -606,15 +634,16 @@ button {
 #settings {
   position: fixed;
   top: 0;
-  right: -570px;
-  width: 550px;
+  right: -500px;
+  z-index: 1000;
+  width: 480px;
+  max-width: 100vw;
   height: 100%;
-  background: var(--surface);
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  z-index: 1000;
-  transition: right 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  background: var(--graphite);
+  border-left: 1px solid var(--rule);
+  transition: right 280ms var(--ease);
 }
 
 #settings.visible {
@@ -625,172 +654,131 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 24px;
-  border-bottom: 1px solid var(--border);
+  padding: 18px 20px 18px 28px;
+  border-bottom: 1px solid var(--rule);
 }
 
 .settings-header h2 {
-  font-size: 18px;
+  font-size: var(--step-2);
   font-weight: 600;
-}
-
-.close-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--text-dim);
-  border-radius: 6px;
-  font-size: 18px;
-  transition: all var(--transition);
-}
-
-.close-btn:hover {
-  background: var(--surface-hover);
-  color: var(--text);
+  font-stretch: semi-condensed;
 }
 
 .settings-body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 28px;
+  padding: 0 28px;
 }
 
-.settings-body section {
-  margin-bottom: 40px;
+.settings-body section,
+.settings-section {
+  padding: 26px 0 28px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.settings-body section:last-child {
+  border-bottom: none;
 }
 
 .settings-body h3 {
-  font-size: 13px;
+  margin-bottom: 14px;
+  font-size: var(--step-1);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-dim);
-  margin-bottom: 20px;
+  font-stretch: semi-condensed;
+  color: var(--paper);
 }
 
-/* Camera entry fields */
-
-.camera-entry {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  margin-bottom: 12px;
-  position: relative;
+.hint {
+  max-width: 62ch;
+  margin-top: 8px;
+  font-size: var(--step--1);
+  line-height: 1.55;
+  color: var(--muted);
 }
 
-.camera-entry input {
-  width: 100%;
-  padding: 8px 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-  transition: border-color var(--transition);
+.hint.section-intro {
+  margin: -6px 0 18px;
 }
 
-.camera-entry input:first-of-type {
-  padding-right: 40px;
-}
-
-.camera-entry input:focus {
-  border-color: var(--accent);
-}
-
-.camera-entry input::placeholder {
-  color: var(--text-dim);
-}
-
-.camera-entry .remove-btn {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--text-dim);
-  border-radius: 4px;
-  font-size: 14px;
-  transition: all var(--transition);
-}
-
-.camera-entry .remove-btn:hover {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--danger);
-}
-
-.api-index {
+/* Labelled form field: the label sits above, never hidden inside the input */
+.field {
   display: block;
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  font-weight: 600;
-  margin-bottom: 4px;
-  opacity: 0.5;
-  cursor: help;
+  margin-top: 16px;
 }
 
-.add-btn {
+.field:first-child {
+  margin-top: 0;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--step--1);
+  color: var(--muted);
+}
+
+.field-optional {
+  margin-left: 4px;
+  color: var(--faint);
+}
+
+.field input,
+.interval-input input,
+select {
+  height: 34px;
+  padding: 0 10px;
+  background: var(--well);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  color: var(--paper);
+  font-size: var(--step-0);
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.field input {
   width: 100%;
-  padding: 10px;
-  background: transparent;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
-  color: var(--text-dim);
-  font-size: 13px;
-  transition: all var(--transition);
 }
 
-.add-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(59, 130, 246, 0.05);
+.field input:focus,
+.interval-input input:focus,
+select:focus {
+  border-color: var(--muted);
 }
 
-/* Interval input */
+.field input::placeholder,
+.interval-input input::placeholder {
+  color: var(--faint);
+}
 
 .interval-input {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
 }
 
 .interval-input input {
   width: 64px;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 14px;
-  font-family: inherit;
-  outline: none;
   text-align: center;
-  transition: border-color var(--transition);
+  font-variant-numeric: tabular-nums;
+}
+
+.interval-input span {
+  font-size: var(--step--1);
+  color: var(--muted);
 }
 
 #api-port {
-  width: 80px;
+  width: 84px;
 }
 
 .interval-input input#api-token,
 .interval-input input#multicast-interface {
-  width: auto;
   flex: 1;
+  width: auto;
   min-width: 0;
+  text-align: left;
 }
 
 .interval-input input[type=number]::-webkit-inner-spin-button,
@@ -799,103 +787,98 @@ button {
   margin: 0;
 }
 
-.interval-input input[type=number] {
-  -moz-appearance: textfield;
+/* Camera rows: number, fields, remove. The number is the camera's key and API index */
+#camera-list {
+  border-top: 1px solid var(--rule);
 }
 
-.interval-input input:focus {
-  border-color: var(--accent);
+.camera-entry {
+  display: grid;
+  grid-template-columns: 32px 1fr 32px;
+  gap: 0 12px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--rule);
 }
 
-.interval-input span {
-  font-size: 13px;
-  color: var(--text-dim);
+.camera-entry-number {
+  padding-top: 20px;
+  font-size: var(--step-2);
+  font-weight: 600;
+  font-stretch: semi-condensed;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--faint);
+  cursor: help;
 }
 
-label {
-  font-size: 14px;
-  color: var(--text);
+.camera-entry-fields .field {
+  margin-top: 10px;
 }
 
-.hint {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 8px;
+.camera-entry-fields .field:first-child {
+  margin-top: 0;
 }
 
-/* Settings footer */
-
-.settings-footer {
-  padding: 16px 24px;
-  border-top: 1px solid var(--border);
+.camera-entry .remove-btn {
+  width: 32px;
+  height: 32px;
+  margin-top: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  border-radius: var(--radius-control);
+  transition: color 120ms ease, background 120ms ease;
 }
 
-.save-btn {
+.camera-entry .remove-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.camera-entry .remove-btn:hover {
+  color: var(--signal-lost);
+  background: rgba(229, 72, 77, 0.1);
+}
+
+.add-btn {
   width: 100%;
-  padding: 10px 20px;
-  background: var(--accent);
-  color: white;
-  border-radius: var(--radius);
-  font-size: 14px;
-  font-weight: 500;
-  transition: background var(--transition);
+  height: 36px;
+  margin-top: 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  color: var(--paper);
+  font-size: var(--step-0);
+  transition: border-color 120ms ease, background 120ms ease;
 }
 
-.save-btn:hover {
-  background: var(--accent-hover);
+.add-btn:hover {
+  border-color: var(--muted);
+  background: rgba(233, 230, 223, 0.04);
 }
 
-/* ── Utility ──────────────────────────────────────────────────────────────── */
-
-.hidden {
-  display: none !important;
-}
-
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #444;
-}
-
-/* ── Toggle Row ───────────────────────────────────────────────────────────── */
-
+/* Switches */
 .toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 0;
-  font-size: 14px;
-  color: var(--text);
+  gap: 16px;
+  padding: 8px 0;
+  font-size: var(--step-0);
+  color: var(--paper);
   cursor: pointer;
-}
-
-.toggle-row + .toggle-row {
-  margin-top: 16px;
 }
 
 .toggle-row input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
-  width: 40px;
-  height: 22px;
-  background: var(--border);
-  border-radius: 11px;
   position: relative;
-  cursor: pointer;
-  transition: background var(--transition);
+  width: 36px;
+  height: 20px;
   flex-shrink: 0;
+  background: var(--rule-strong);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 150ms ease;
 }
 
 .toggle-row input[type="checkbox"]::after {
@@ -903,60 +886,337 @@ label {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 16px;
-  height: 16px;
-  background: white;
+  width: 14px;
+  height: 14px;
+  background: var(--paper);
   border-radius: 50%;
-  transition: transform var(--transition);
+  transition: transform 150ms var(--ease), background 150ms ease;
 }
 
 .toggle-row input[type="checkbox"]:checked {
-  background: var(--accent);
+  background: var(--paper);
 }
 
 .toggle-row input[type="checkbox"]:checked::after {
-  transform: translateX(18px);
+  background: var(--graphite);
+  transform: translateX(16px);
 }
-
-/* ── Select Dropdown ──────────────────────────────────────────────────────── */
 
 select {
   display: block;
   width: 100%;
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
+  margin-top: 6px;
   cursor: pointer;
-  transition: border-color var(--transition);
-}
-
-select:focus {
-  border-color: var(--accent);
 }
 
 select option {
-  background: var(--surface);
-  color: var(--text);
+  background: var(--graphite);
+  color: var(--paper);
 }
 
-/* ── Solo Mode ────────────────────────────────────────────────────────────── */
-
-.camera-tile.solo {
-  grid-column: 1 / -1;
-  grid-row: 1 / -1;
+/* API reference, folded away until needed */
+.api-reference {
+  margin-top: 22px;
+  border-top: 1px solid var(--rule);
+  padding-top: 14px;
 }
 
-.camera-tile.solo canvas {
-  object-fit: contain;
+.api-reference summary {
+  cursor: pointer;
+  font-size: var(--step-0);
+  color: var(--muted);
+  list-style: none;
 }
 
-/* ── Pixel Refresh Overlay ────────────────────────────────────────────────── */
+.api-reference summary::-webkit-details-marker {
+  display: none;
+}
+
+.api-reference summary::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 10px 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 150ms var(--ease);
+}
+
+.api-reference[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.api-reference summary:hover {
+  color: var(--paper);
+}
+
+.api-reference dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  margin-top: 14px;
+  font-size: var(--step--1);
+}
+
+.api-reference dt {
+  font-variant-numeric: tabular-nums;
+}
+
+.api-reference dd {
+  color: var(--muted);
+}
+
+/* Stream health: one ruled row per camera */
+#health-stats-container {
+  border-top: 1px solid var(--rule);
+}
+
+.health-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.health-row:last-child {
+  border-bottom: none;
+}
+
+.health-dot {
+  width: 4px;
+  height: 16px;
+  flex-shrink: 0;
+  background: var(--faint);
+  transition: background 300ms ease;
+}
+
+.health-row[data-health-state="online"] .health-dot { background: var(--signal-ok); }
+.health-row[data-health-state="warn"]   .health-dot { background: var(--signal-wait); }
+.health-row[data-health-state="error"]  .health-dot { background: var(--signal-lost); }
+
+.health-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-stretch: semi-condensed;
+  color: var(--paper);
+}
+
+.health-row-stats {
+  flex-shrink: 0;
+  color: var(--paper);
+  font-variant-numeric: tabular-nums;
+}
+
+.health-row-unit {
+  margin-left: 4px;
+  color: var(--muted);
+}
+
+.health-row[data-health-state="unknown"] .health-row-stats,
+.health-row[data-health-state="error"] .health-row-stats {
+  color: var(--muted);
+}
+
+/* Version */
+.update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-row #current-version {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.settings-footer {
+  padding: 16px 28px;
+  border-top: 1px solid var(--rule);
+}
+
+.save-btn {
+  width: 100%;
+  height: 40px;
+}
+
+/* ── Toasts ───────────────────────────────────────────────────────────────── */
+
+#toast-container {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  max-width: 380px;
+  padding: 11px 16px 12px 14px;
+  background: var(--graphite);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--muted);
+  border-radius: var(--radius-control);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  color: var(--paper);
+  font-size: var(--step-0);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  animation: toast-in 220ms var(--ease);
+  transition: opacity 300ms ease;
+}
+
+.toast-success { border-left-color: var(--signal-ok); }
+.toast-warn    { border-left-color: var(--signal-wait); }
+.toast-error   { border-left-color: var(--signal-lost); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Update dialog ────────────────────────────────────────────────────────── */
+
+#update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+#update-overlay.visible {
+  opacity: 1;
+}
+
+#update-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 2001;
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  background: var(--graphite);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  transform: translate(-50%, -48%);
+  transition: opacity 220ms ease, transform 220ms var(--ease);
+}
+
+#update-modal.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%);
+}
+
+.update-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 16px 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.update-modal-header h2 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  font-stretch: semi-condensed;
+}
+
+.update-modal-body {
+  padding: 22px 24px;
+}
+
+.update-version-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  font-size: var(--step-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.update-version-current {
+  color: var(--muted);
+}
+
+.update-arrow {
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.update-version-new {
+  font-weight: 600;
+  color: var(--paper);
+}
+
+.update-changelog {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--well);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: var(--step--1);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.update-changelog:empty {
+  display: none;
+}
+
+.update-progress {
+  margin-top: 16px;
+}
+
+.update-progress-bar {
+  height: 4px;
+  background: var(--well);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: var(--paper);
+  transition: width 300ms ease;
+}
+
+.update-progress-text {
+  display: block;
+  margin-top: 8px;
+  font-size: var(--step--1);
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--rule);
+}
+
+/* ── Pixel refresh (burn-in protection in solo mode) ──────────────────────── */
 
 #pixel-refresh {
   position: fixed;
@@ -979,333 +1239,32 @@ select option {
   100% { opacity: 0; }
 }
 
-/* ── Health Stats Section ─────────────────────────────────────────────────── */
+/* ── Scrollbars ───────────────────────────────────────────────────────────── */
 
-.settings-section h3 {
-  margin: 0 0 1rem 0;
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-#health-stats-container {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 1rem;
-}
-
-.health-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-}
-
-.health-dot {
-  flex-shrink: 0;
+::-webkit-scrollbar {
   width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #444;
-  transition: background 0.4s, box-shadow 0.4s;
 }
 
-.health-row[data-health-state="online"] .health-dot {
-  background: #10b981;
-  box-shadow: 0 0 6px #10b98155;
-}
-
-.health-row[data-health-state="warn"] .health-dot {
-  background: #f59e0b;
-  box-shadow: 0 0 6px #f59e0b55;
-}
-
-.health-row[data-health-state="error"] .health-dot {
-  background: #ef4444;
-  box-shadow: 0 0 6px #ef444455;
-}
-
-.health-row-name {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.health-row-stats {
-  font-size: 0.75rem;
-  color: #666;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: color 0.4s;
-}
-
-.health-row[data-health-state="online"] .health-row-stats { color: #888; }
-.health-row[data-health-state="warn"]   .health-row-stats { color: #b07000; }
-.health-row[data-health-state="error"]  .health-row-stats { color: #a03030; }
-
-/* ── Shared Button Styles ─────────────────────────────────────────────────── */
-
-.btn-primary {
-  padding: 10px 20px;
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: var(--radius);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background var(--transition);
-}
-
-.btn-primary:hover {
-  background: var(--accent-hover);
-}
-
-/* ── Toast Notifications ──────────────────────────────────────────────────── */
-
-.toast {
-  padding: 12px 20px;
-  border-radius: 6px;
-  color: white;
-  font-size: 14px;
-  animation: slideIn 0.3s ease-out;
-  transition: opacity 0.3s ease-out;
-  max-width: 400px;
-  word-wrap: break-word;
-}
-
-.toast-info { background: #3b82f6; }
-.toast-warn { background: #f59e0b; }
-.toast-error { background: #ef4444; }
-.toast-success { background: #10b981; }
-
-@keyframes slideIn {
-  from {
-    transform: translateX(400px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-/* ── Update Section in Settings ───────────────────────────────────────────── */
-
-.update-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.update-row #current-version {
-  font-size: 13px;
-  color: var(--text-dim);
-  font-family: monospace;
-}
-
-.check-update-btn {
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 6px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.check-update-btn:hover {
-  background: var(--hover);
-  border-color: var(--text-dim);
-}
-
-.check-update-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* ── Update Modal ─────────────────────────────────────────────────────────── */
-
-#update-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 2000;
-  opacity: 0;
-  transition: opacity 250ms ease;
-}
-
-#update-overlay.visible {
-  opacity: 1;
-}
-
-#update-modal {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) scale(0.95);
-  width: 440px;
-  max-width: 90vw;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  display: flex;
-  flex-direction: column;
-  z-index: 2001;
-  opacity: 0;
-  transition: opacity 250ms ease, transform 250ms ease;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-
-#update-modal.visible {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-
-.update-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 22px;
-  border-bottom: 1px solid var(--border);
-}
-
-.update-modal-header h2 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.update-modal-body {
-  padding: 22px;
-}
-
-.update-version-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.update-version-current {
-  font-family: monospace;
-  font-size: 14px;
-  color: var(--text-dim);
-  background: var(--bg);
-  padding: 4px 10px;
-  border-radius: 6px;
-}
-
-.update-arrow {
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-
-.update-version-new {
-  font-family: monospace;
-  font-size: 14px;
-  color: #10b981;
-  background: rgba(16, 185, 129, 0.1);
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-weight: 600;
-}
-
-.update-changelog {
-  font-size: 13px;
-  color: var(--text-dim);
-  line-height: 1.5;
-  max-height: 200px;
-  overflow-y: auto;
-  background: var(--bg);
-  border-radius: 8px;
-  padding: 14px;
-  white-space: pre-wrap;
-}
-
-.update-changelog:empty {
-  display: none;
-}
-
-.update-progress {
-  margin-top: 16px;
-}
-
-.update-progress-bar {
-  height: 6px;
-  background: var(--bg);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.update-progress-fill {
-  height: 100%;
-  width: 0%;
-  background: #3b82f6;
-  border-radius: 3px;
-  transition: width 0.3s ease;
-}
-
-.update-progress-text {
-  display: block;
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--text-dim);
-  text-align: center;
-}
-
-.update-modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 16px 22px;
-  border-top: 1px solid var(--border);
-}
-
-.update-later-btn {
+::-webkit-scrollbar-track {
   background: transparent;
-  color: var(--text-dim);
-  border: 1px solid var(--border);
-  padding: 8px 18px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.15s;
 }
 
-.update-later-btn:hover {
-  background: var(--hover);
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border: 2px solid var(--graphite);
+  border-radius: 4px;
 }
 
-.update-now-btn {
-  background: #3b82f6;
-  color: #fff;
-  border: none;
-  padding: 8px 22px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  transition: background 0.15s;
+::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
 }
 
-.update-now-btn:hover {
-  background: #2563eb;
-}
+/* ── Reduced motion ───────────────────────────────────────────────────────── */
 
-.update-now-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
