@@ -786,7 +786,8 @@ button {
   width: 80px;
 }
 
-.interval-input input#api-token {
+.interval-input input#api-token,
+.interval-input input#multicast-interface {
   width: auto;
   flex: 1;
   min-width: 0;

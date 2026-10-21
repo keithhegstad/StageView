@@ -143,6 +143,13 @@
           </div>
         </label>
         <p class="hint">When set, network calls need <code>?token=…</code>, e.g. <code>/api/grid?token=…</code>. Open the control panel once as <code>http://stageview.local:8090/?token=…</code>.</p>
+        <label>
+          Multicast adapter (IP)
+          <div class="interval-input">
+            <input type="text" id="multicast-interface" placeholder="Automatic" autocomplete="off" spellcheck="false" />
+          </div>
+        </label>
+        <p class="hint">This PC's IPv4 address on the camera network. Leave empty to use the adapter with the default gateway; set it if cameras show nothing while VPN, Hyper-V, WSL or Docker adapters are active.</p>
         <p class="hint">HTTP API and browser control panel (requires restart to change port)</p>
         <div class="api-endpoints">
           <p class="hint" style="margin-top:12px;font-family:monospace">

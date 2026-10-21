@@ -555,6 +555,7 @@ class StageView {
     this.showCameraNames = true;
     this.apiPort = 8090;
     this.apiToken = "";
+    this.multicastInterface = "";
     this.shuffleTimerId = null;
     this._noiseDataUrl = null; // cached noise texture for pixel refresh
     this.nextShuffleAt = 0;
@@ -586,6 +587,7 @@ class StageView {
       this.showCameraNames = config.show_camera_names !== false;
       this.apiPort = config.api_port || 8090;
       this.apiToken = config.api_token || "";
+      this.multicastInterface = config.multicast_interface || "";
 
       // Listen for camera status events (online / offline / error / connecting / reconnecting)
       this.unlistenStatus = await listen("camera-status", (event) => {
@@ -1270,6 +1272,11 @@ class StageView {
     document.getElementById("show-camera-names").checked = this.showCameraNames;
     document.getElementById("api-port").value = this.apiPort;
     document.getElementById("api-token").value = this.apiToken;
+    const mcastInput = document.getElementById("multicast-interface");
+    mcastInput.value = this.multicastInterface;
+    invoke("default_multicast_interface")
+      .then((ip) => { mcastInput.placeholder = ip ? `Automatic (${ip})` : "Automatic"; })
+      .catch(() => {});
     this.renderCameraList();
     this.injectHealthSection();
   }
@@ -1651,6 +1658,7 @@ class StageView {
     const showCameraNames = document.getElementById("show-camera-names").checked;
     const apiPort = parseInt(document.getElementById("api-port").value, 10) || 8090;
     const apiToken = document.getElementById("api-token").value.trim();
+    const multicastInterface = document.getElementById("multicast-interface").value.trim();
 
     try {
       // Read existing config to preserve window_state and other fields
@@ -1661,6 +1669,7 @@ class StageView {
       config.show_camera_names = showCameraNames;
       config.api_port = apiPort;
       config.api_token = apiToken;
+      config.multicast_interface = multicastInterface;
 
       await invoke("save_config", { config });
 
@@ -1671,6 +1680,7 @@ class StageView {
       this.showCameraNames = showCameraNames;
       this.apiPort = apiPort;
       this.apiToken = apiToken;
+      this.multicastInterface = multicastInterface;
 
       // Restart streams with new camera list and codec settings
       this._stopAllReaders();

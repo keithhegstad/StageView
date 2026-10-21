@@ -53,6 +53,10 @@ pub struct AppConfig {
     /// Shared secret for /api/* requests from the network (`?token=`). Empty = no auth.
     #[serde(default)]
     pub api_token: String,
+    /// Local adapter IPv4 to join camera multicast groups on. Empty = automatic
+    /// (the adapter carrying the default route).
+    #[serde(default)]
+    pub multicast_interface: String,
     #[serde(default)]
     pub window_state: WindowState,
 }
@@ -69,6 +73,7 @@ impl Default for AppConfig {
             show_camera_names: true,
             api_port: 8090,
             api_token: String::new(),
+            multicast_interface: String::new(),
             window_state: WindowState::default(),
         }
     }
@@ -144,6 +149,9 @@ fn valid_api_token(token: &str) -> bool {
 fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> {
     if !valid_api_token(&config.api_token) {
         return Err("API token may only contain letters, digits, - and _".to_string());
+    }
+    if !valid_multicast_interface(&config.multicast_interface) {
+        return Err("Multicast adapter must be empty (automatic) or this PC's IPv4 address, e.g. 192.168.3.71".to_string());
     }
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
@@ -598,8 +606,22 @@ async fn stream_camera(
     }
 }
 
+/// Add `localaddr=<ip>` so FFmpeg joins the multicast group on that adapter.
+/// Without it Windows joins on the adapter with the best metric, which can be a
+/// virtual one (Hyper-V/WSL/Docker "vEthernet") that never sees the cameras.
+fn with_localaddr(url: String, multicast_iface: Option<&str>) -> String {
+    match multicast_iface {
+        Some(ip) => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            format!("{}{}localaddr={}", url, sep, ip)
+        }
+        None => url,
+    }
+}
+
 /// Protocol-specific FFmpeg input flags plus the (possibly rewritten) input URL.
-fn build_input_args(url: &str) -> (Vec<String>, String) {
+/// `multicast_iface` is the local adapter address to join rtp:// and udp:// groups on.
+fn build_input_args(url: &str, multicast_iface: Option<&str>) -> (Vec<String>, String) {
     let mut args: Vec<String> = Vec::new();
     // Rewrite the input URL and add protocol-specific flags
     let input_url = if url.starts_with("rtp://") {
@@ -615,7 +637,7 @@ fn build_input_args(url: &str) -> (Vec<String>, String) {
             "-flags".into(),           "low_delay".into(),
             "-thread_queue_size".into(),"512".into(),
         ]);
-        url.to_string()
+        with_localaddr(url.to_string(), multicast_iface)
     } else if url.starts_with("udp://") {
         // Raw UDP multicast: rewrite to udp://@ so ffmpeg joins the group
         let addr = url
@@ -631,7 +653,7 @@ fn build_input_args(url: &str) -> (Vec<String>, String) {
             "-overrun_nonfatal".into(),"1".into(),
             "-thread_queue_size".into(),"512".into(),
         ]);
-        format!("udp://@{}?timeout=10000000", addr)
+        with_localaddr(format!("udp://@{}?timeout=10000000", addr), multicast_iface)
     } else if url.starts_with("rtsp://") {
         args.extend([
             "-analyzeduration".into(),   "100000".into(),  // 0.1s for RTSP setup
@@ -704,7 +726,11 @@ async fn try_stream_camera(
         "error".into(),
     ];
 
-    let (input_args, input_url) = build_input_args(url);
+    let multicast_iface = multicast_interface(state);
+    if url.starts_with("rtp://") || url.starts_with("udp://") {
+        info!("Joining multicast for {} on adapter {}", camera_id, multicast_iface.as_deref().unwrap_or("(Windows default)"));
+    }
+    let (input_args, input_url) = build_input_args(url, multicast_iface.as_deref());
     args.extend(input_args);
     args.extend(["-i".into(), input_url]);
 
@@ -1090,6 +1116,30 @@ fn get_local_ipv4() -> Option<std::net::Ipv4Addr> {
         std::net::IpAddr::V4(ip) => Some(ip),
         _ => None,
     }
+}
+
+/// Adapter to join multicast on: the configured one, else the default-route adapter.
+fn multicast_interface(state: &AppState) -> Option<String> {
+    let configured = state.config.lock().ok().map(|c| c.multicast_interface.trim().to_string()).unwrap_or_default();
+    if !configured.is_empty() {
+        return Some(configured);
+    }
+    get_local_ipv4().map(|ip| ip.to_string())
+}
+
+/// Empty (automatic) or a plain unicast IPv4 address.
+fn valid_multicast_interface(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || value.parse::<std::net::Ipv4Addr>().map_or(false, |ip| {
+            !ip.is_multicast() && !ip.is_unspecified() && !ip.is_broadcast()
+        })
+}
+
+/// The adapter address automatic mode would use, shown as a hint in Settings.
+#[tauri::command]
+fn default_multicast_interface() -> Option<String> {
+    get_local_ipv4().map(|ip| ip.to_string())
 }
 
 /// Register the app as `stageview.local` via mDNS so browsers on the local
@@ -1716,6 +1766,7 @@ pub fn run() {
             start_streams,
             stop_streams,
             solo_camera,
+            default_multicast_interface,
             get_stream_health,
             api_fullscreen,
             api_reload,
@@ -1734,7 +1785,7 @@ mod tests {
 
     #[test]
     fn rtsp_uses_timeout_not_removed_stimeout() {
-        let (args, input) = build_input_args("rtsp://cam.local:554/stream");
+        let (args, input) = build_input_args("rtsp://cam.local:554/stream", None);
         assert_eq!(input, "rtsp://cam.local:554/stream");
         assert!(!args.iter().any(|a| a == "-stimeout"), "FFmpeg 5+ rejects -stimeout");
         assert_eq!(arg_after(&args, "-timeout"), Some("10000000"));
@@ -1743,7 +1794,7 @@ mod tests {
 
     #[test]
     fn udp_url_is_rewritten_to_join_group() {
-        let (_, input) = build_input_args("udp://239.1.1.1:5000");
+        let (_, input) = build_input_args("udp://239.1.1.1:5000", None);
         assert_eq!(input, "udp://@239.1.1.1:5000?timeout=10000000");
     }
 
@@ -1913,5 +1964,46 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "child survived closing the job");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn rtp_multicast_joins_on_chosen_adapter() {
+        let (_, input) = build_input_args("rtp://224.1.2.3:4000", Some("192.168.3.71"));
+        assert_eq!(input, "rtp://224.1.2.3:4000?localaddr=192.168.3.71");
+    }
+
+    #[test]
+    fn rtp_url_with_existing_options_keeps_them() {
+        let (_, input) = build_input_args("rtp://224.1.2.3:4000?sources=192.168.3.34", Some("192.168.3.71"));
+        assert_eq!(input, "rtp://224.1.2.3:4000?sources=192.168.3.34&localaddr=192.168.3.71");
+    }
+
+    #[test]
+    fn udp_multicast_joins_on_chosen_adapter() {
+        let (_, input) = build_input_args("udp://239.1.1.1:5000", Some("192.168.3.71"));
+        assert_eq!(input, "udp://@239.1.1.1:5000?timeout=10000000&localaddr=192.168.3.71");
+    }
+
+    #[test]
+    fn unicast_protocols_ignore_the_adapter() {
+        for url in ["rtsp://192.168.3.34:554/live/av0", "rtmp://192.168.3.34:1935/live/av1", "srt://10.0.0.1:9000", "http://cam/video"] {
+            let (_, input) = build_input_args(url, Some("192.168.3.71"));
+            assert_eq!(input, url);
+        }
+    }
+
+    #[test]
+    fn multicast_adapter_setting_validation() {
+        assert!(valid_multicast_interface(""));
+        assert!(valid_multicast_interface("192.168.3.71"));
+        assert!(!valid_multicast_interface("Ethernet"));
+        assert!(!valid_multicast_interface("192.168.3"));
+        assert!(!valid_multicast_interface("224.1.2.3"), "a multicast group is not an adapter address");
+    }
+
+    #[test]
+    fn config_without_multicast_adapter_still_loads() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
+        assert_eq!(cfg.multicast_interface, "");
     }
 }
