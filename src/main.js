@@ -24,6 +24,9 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+const TRACE_W = 300;
+const TRACE_H = 32;
+
 // ── MSE-based fMP4 Stream Reader ────────────────────────────────────────────
 // Reads fMP4 stream via fetch() and feeds it to a <video> element using
 // Media Source Extensions for hardware-accelerated H.264/H.265 decode.
@@ -565,6 +568,7 @@ class StageView {
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
     this.healthStats = new Map(); // camera_id -> health object
+    this.healthHistory = new Map(); // stream id -> recent { fps, kbps } samples, oldest first
     this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
     this._configSavePromise = null; // serializes config save operations
     this.streamReaders = new Map(); // camera_id -> Mp4StreamReader
@@ -621,10 +625,17 @@ class StageView {
       this.unlistenHealth = await listen("stream-health", (event) => {
         const { camera_id, health } = event.payload;
         this.healthStats.set(camera_id, health);
-        const row = document.querySelector(`#health-stats-container [data-camera-id="${camera_id}"]`);
-        if (!row) return;
-        const fpsEl = row.querySelector('[data-metric="fps"]');
-        if (fpsEl) fpsEl.textContent = health.fps > 0 ? health.fps.toFixed(1) : '--';
+        // The first sample after a (re)start covers FFmpeg's start-up, not the
+        // camera, so it would always draw as a dip; leave it out of the history.
+        if (health.uptime_secs >= 3) {
+          const history = this.healthHistory.get(camera_id) || [];
+          history.push({ fps: health.fps, kbps: health.bitrate_kbps });
+          if (history.length > HISTORY_SAMPLES) history.shift();
+          this.healthHistory.set(camera_id, history);
+        }
+        const camId = camera_id.replace(/\.grid$/, '');
+        const row = document.querySelector(`#health-stats-container [data-camera-id="${camId}"]`);
+        if (row) this.renderHealthRow(row);
       });
 
       // Listen for stream errors (deduplicate per camera to prevent toast flood)
@@ -1307,12 +1318,22 @@ class StageView {
     const healthHTML = `
       <div class="settings-section">
         <h3>Stream health</h3>
+        <p class="hint section-intro">Frames per second over the last 3 minutes. Amber marks a dip, red marks lost frames.</p>
         <div id="health-stats-container">
           ${this.cameras.map(cam => `
             <div class="health-row" data-camera-id="${cam.id}" data-health-state="unknown">
               <span class="health-dot"></span>
-              <span class="health-row-name">${escapeHtml(cam.name)}</span>
-              <span class="health-row-stats"><span data-metric="fps">--</span><span class="health-row-unit">fps</span></span>
+              <div class="health-row-main">
+                <span class="health-row-name">${escapeHtml(cam.name)}</span>
+                <div class="health-trace-box">
+                  <svg class="health-trace" viewBox="0 0 ${TRACE_W} ${TRACE_H}" preserveAspectRatio="none" role="img"></svg>
+                  <span class="health-trace-waiting">Waiting for data</span>
+                </div>
+              </div>
+              <div class="health-row-stats">
+                <span class="health-row-fps"><span data-metric="fps">--</span><span class="health-row-unit">fps</span></span>
+                <span class="health-row-bitrate" data-metric="bitrate"></span>
+              </div>
             </div>
           `).join('')}
         </div>
@@ -1348,12 +1369,44 @@ class StageView {
 
       // Dot color driven directly from live camera status (reliable, already maintained)
       row.setAttribute('data-health-state', this._healthStateFromStatus(this.cameraStatuses.get(cameraId) || ''));
-
-      // FPS from last health event
-      const health = this.healthStats.get(cameraId);
-      const fpsEl = row.querySelector('[data-metric="fps"]');
-      if (fpsEl) fpsEl.textContent = (health && health.fps > 0) ? health.fps.toFixed(1) : '--';
+      this.renderHealthRow(row);
     });
+  }
+
+  /** Redraw one Stream health row: current numbers and the frame-rate trace. */
+  renderHealthRow(row) {
+    const camId = row.dataset.cameraId;
+    const cam = this.cameras.find(c => c.id === camId);
+    // Follow whichever stream the tile is showing (main, or its grid substream)
+    const tile = document.querySelector(`.camera-tile[data-id="${camId}"]`);
+    const streamId = tile?.dataset.stream || camId;
+    const history = this.healthHistory.get(streamId) || [];
+    const latest = this.healthStats.get(streamId);
+
+    const fpsEl = row.querySelector('[data-metric="fps"]');
+    fpsEl.textContent = latest && latest.fps > 0 ? latest.fps.toFixed(1) : '--';
+    const kbps = latest ? latest.bitrate_kbps : 0;
+    row.querySelector('[data-metric="bitrate"]').textContent =
+      kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbit/s` : kbps > 0 ? `${Math.round(kbps)} kbit/s` : '';
+
+    const svg = row.querySelector('.health-trace');
+    row.classList.toggle('has-history', history.length > 0);
+    if (!history.length) {
+      svg.innerHTML = '';
+      svg.setAttribute('aria-label', `${cam ? cam.name : camId}: waiting for data`);
+      return;
+    }
+    const g = traceGeometry(history.map(h => h.fps), TRACE_W, TRACE_H);
+    const ref = g.referenceY.toFixed(1);
+    svg.innerHTML =
+      `<line class="trace-ref" x1="0" x2="${TRACE_W}" y1="${ref}" y2="${ref}" />` +
+      g.segments.map(seg =>
+        `<polyline class="trace-${seg.state}" points="${seg.points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ')}" />`
+      ).join('');
+    const dips = g.segments.filter(sg => sg.state !== 'ok').length;
+    svg.setAttribute('aria-label',
+      `${cam ? cam.name : camId}: ${fpsEl.textContent} frames per second now, normally ${g.nominal}` +
+      (dips ? `, ${dips} dip${dips > 1 ? 's' : ''} in the last 3 minutes` : ', steady for the last 3 minutes'));
   }
 
   showToast(message, type = 'info') {

@@ -974,10 +974,11 @@ select option {
 }
 
 .health-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 0;
+  display: grid;
+  grid-template-columns: 4px 1fr auto;
+  gap: 0 14px;
+  align-items: stretch;
+  padding: 12px 0;
   border-bottom: 1px solid var(--rule);
 }
 
@@ -986,9 +987,6 @@ select option {
 }
 
 .health-dot {
-  width: 4px;
-  height: 16px;
-  flex-shrink: 0;
   background: var(--faint);
   transition: background 300ms ease;
 }
@@ -997,9 +995,12 @@ select option {
 .health-row[data-health-state="warn"]   .health-dot { background: var(--signal-wait); }
 .health-row[data-health-state="error"]  .health-dot { background: var(--signal-lost); }
 
-.health-row-name {
-  flex: 1;
+.health-row-main {
   min-width: 0;
+}
+
+.health-row-name {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1008,19 +1009,85 @@ select option {
   color: var(--paper);
 }
 
+/* Frame-rate trace: off-white while steady, amber on a dip, red where frames stop */
+.health-trace-box {
+  position: relative;
+  height: 32px;
+  margin-top: 6px;
+}
+
+.health-trace {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.health-trace polyline,
+.health-trace line {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.health-trace .trace-ref {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.health-trace .trace-ok   { stroke: var(--paper);       stroke-width: 1.5; }
+.health-trace .trace-dip  { stroke: var(--signal-wait); stroke-width: 2; }
+.health-trace .trace-lost { stroke: var(--signal-lost); stroke-width: 2; }
+
+.health-trace-waiting {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--rule-strong);
+  font-size: var(--step--1);
+  color: var(--faint);
+}
+
+.health-row.has-history .health-trace-waiting {
+  display: none;
+}
+
 .health-row-stats {
-  flex-shrink: 0;
-  color: var(--paper);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 76px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.health-row-fps {
+  font-size: var(--step-1);
+  font-weight: 600;
+  color: var(--paper);
+  line-height: 1.1;
 }
 
 .health-row-unit {
   margin-left: 4px;
+  font-size: var(--step--1);
+  font-weight: 400;
   color: var(--muted);
 }
 
-.health-row[data-health-state="unknown"] .health-row-stats,
-.health-row[data-health-state="error"] .health-row-stats {
+.health-row-bitrate {
+  font-size: var(--step--1);
+  color: var(--muted);
+}
+
+.health-row[data-health-state="unknown"] .health-row-fps,
+.health-row[data-health-state="error"] .health-row-fps {
   color: var(--muted);
 }
 
