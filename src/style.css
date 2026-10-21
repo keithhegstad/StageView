@@ -1153,44 +1153,8 @@ select option {
 }
 
 /* ── Update moments ───────────────────────────────────────────────────────────
-   The one place the interface celebrates: confetti springs from the panel that
-   says what changed. Velvet and gold appear only here (the update prompt keeps
-   its valance); everywhere else colour still means state. */
-
-:root {
-  --velvet-deep: #5a0e16;
-  --velvet: #861923;
-  --velvet-light: #a3242f;
-  --gold: #d9a441;
-}
-
-/* Velvet: vertical folds, darker at the top and floor */
-.valance {
-  background:
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.45), transparent 22%, transparent 72%, rgba(0, 0, 0, 0.55)),
-    repeating-linear-gradient(90deg,
-      var(--velvet-deep) 0px, var(--velvet) 16px, var(--velvet-light) 27px,
-      var(--velvet) 38px, var(--velvet-deep) 54px);
-}
-
-/* Valance: a short band of curtain with a scalloped, gold-fringed hem */
-.valance {
-  position: relative;
-  height: 30px;
-  box-shadow: inset 0 -2px 0 var(--gold);
-}
-
-.valance::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 11px;
-  background:
-    radial-gradient(circle at 11px 0, var(--velvet-deep) 9.5px, var(--gold) 10px, var(--gold) 11px, transparent 11.5px)
-    0 0 / 22px 11px repeat-x;
-}
+   The one place the interface celebrates: confetti springs from the panel
+   that says what changed. Everywhere else colour still means state. */
 
 /* Lists of changes: title above, one-line explanation below */
 .change-group + .change-group {
@@ -1265,13 +1229,9 @@ select option {
   transform: translate(-50%, -50%);
 }
 
-#update-modal .valance {
-  flex-shrink: 0;
-}
-
 .update-close {
   position: absolute;
-  top: 46px;
+  top: 12px;
   right: 12px;
 }
 
