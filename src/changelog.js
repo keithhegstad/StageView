@@ -6,6 +6,23 @@
 
 const CHANGELOG = [
   {
+    version: '1.3.1',
+    changes: [
+      {
+        title: 'Confetti straight from the news',
+        detail: 'After an update, confetti bursts from the panel that lists what changed. The curtains are gone, so the changes appear straight away.',
+      },
+      {
+        title: 'A simpler update prompt',
+        detail: 'The velvet band above the update prompt is gone, and the close button is back in its corner.',
+      },
+      {
+        title: 'Every screen hears what is new',
+        detail: 'Screens still being set up, or with their cameras removed, now see what changed after an update instead of skipping it.',
+      },
+    ],
+  },
+  {
     version: '1.3.0',
     changes: [
       {
