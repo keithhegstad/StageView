@@ -1807,6 +1807,10 @@ class StageView {
 
   async maybeCelebrateUpdate() {
     if (!this.appVersion) return;
+    // Development builds (npm run tauri dev) share this PC's config with the
+    // installed app. If they counted, a developer's PC would mark a version as
+    // seen before installing it and never see that release's celebration.
+    if (await invoke('is_dev_build').catch(() => false)) return;
     let config;
     try { config = await invoke('get_config'); } catch (_) { return; }
     const lastSeen = config.last_seen_version || '';

@@ -55,10 +55,14 @@ function loadMain() {
     setTimeout, clearTimeout, setInterval, clearInterval, console,
   };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8'), ctx);
+  // Same order as index.html: main.js uses the changelog and update helpers
+  for (const file of ['changelog.js', 'updates.js', 'main.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src', file), 'utf8'), ctx);
+  }
   return {
     Reader: vm.runInContext('Mp4StreamReader', ctx),
     StageView: vm.runInContext('StageView', ctx),
+    window: ctx.window, // set window.__TAURI__ to stand in for the backend
     fetched,
   };
 }

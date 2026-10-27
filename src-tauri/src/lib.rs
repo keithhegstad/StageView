@@ -1144,6 +1144,13 @@ fn valid_multicast_interface(value: &str) -> bool {
         })
 }
 
+/// True for development builds (`tauri dev`). They share the installed app's
+/// config, so the frontend keeps them from recording which version this PC ran.
+#[tauri::command]
+fn is_dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// The adapter address automatic mode would use, shown as a hint in Settings.
 #[tauri::command]
 fn default_multicast_interface() -> Option<String> {
@@ -1775,6 +1782,7 @@ pub fn run() {
             stop_streams,
             solo_camera,
             default_multicast_interface,
+            is_dev_build,
             get_stream_health,
             api_fullscreen,
             api_reload,
