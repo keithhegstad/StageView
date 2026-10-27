@@ -18,10 +18,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Restores the cache warmed on main (warm-cache.yml). A tag's own cache
+      # can't be used by later tags, so saving one here would only cost time.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          shared-key: release
+          save-if: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -41,24 +45,8 @@ jobs:
             echo 'NOTES_END'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Download FFmpeg sidecar binary
-        shell: pwsh
-        run: |
-          # Gyan's GitHub mirror keeps every version; gyan.dev/packages drops old ones
-          $ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip"
-          $zipPath = "$env:RUNNER_TEMP\ffmpeg.zip"
-          $extractPath = "$env:RUNNER_TEMP\ffmpeg"
-          $destPath = "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
-
-          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-          $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-          if (-not $ffmpegExe) { Write-Error "ffmpeg.exe not found in archive"; exit 1 }
-
-          New-Item -ItemType Directory -Path "src-tauri/binaries" -Force | Out-Null
-          Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
-          Write-Host "FFmpeg placed at $destPath"
+      - name: FFmpeg sidecar
+        uses: ./.github/actions/ffmpeg-sidecar
 
       - name: Build and release
         uses: tauri-apps/tauri-action@v0

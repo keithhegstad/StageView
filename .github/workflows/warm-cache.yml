@@ -1,0 +1,50 @@
+name: Warm build cache
+
+# Release builds run on version tags, and GitHub keeps a tag's cache to that
+# tag, so each release used to compile every dependency from scratch. This
+# compiles the release build on main, whose cache every tag can restore.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'package.json'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  workflow_dispatch:
+
+concurrency:
+  group: warm-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release # the key the release build restores
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: FFmpeg sidecar
+        uses: ./.github/actions/ffmpeg-sidecar
+
+      # Same compile as the release build, without installers or signing
+      - name: Compile release build
+        run: npm run tauri build -- --no-bundle

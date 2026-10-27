@@ -1,0 +1,24 @@
+name: FFmpeg sidecar
+description: Download FFmpeg 8.0.1 (essentials build) to where Tauri bundles it as a sidecar binary
+
+runs:
+  using: composite
+  steps:
+    - name: Download FFmpeg sidecar binary
+      shell: pwsh
+      run: |
+        # Gyan's GitHub mirror keeps every version; gyan.dev/packages drops old ones
+        $ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip"
+        $zipPath = "$env:RUNNER_TEMP\ffmpeg.zip"
+        $extractPath = "$env:RUNNER_TEMP\ffmpeg"
+        $destPath = "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
+
+        Invoke-WebRequest -Uri $ffmpegUrl -OutFile $zipPath -UseBasicParsing
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+        $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+        if (-not $ffmpegExe) { Write-Error "ffmpeg.exe not found in archive"; exit 1 }
+
+        New-Item -ItemType Directory -Path "src-tauri/binaries" -Force | Out-Null
+        Copy-Item $ffmpegExe.FullName -Destination $destPath -Force
+        Write-Host "FFmpeg placed at $destPath"
