@@ -107,7 +107,6 @@ pub struct StreamHealth {
     pub frame_count: u64,
     pub last_frame_at: u64, // Unix timestamp in milliseconds
     pub uptime_secs: u64,
-    pub resolution: Option<String>, // e.g. "1920x1080"
     pub codec: String, // "H264 (copy)"
 }
 
@@ -125,6 +124,14 @@ struct StreamErrorEvent {
 
 // ── App State ────────────────────────────────────────────────────────────────
 
+/// A chunk of fMP4 shared between clients without copying (~200 KB per fragment).
+type Segment = Arc<Vec<u8>>;
+type FrameSender = tokio::sync::broadcast::Sender<Segment>;
+
+fn frame_channel() -> FrameSender {
+    tokio::sync::broadcast::channel(60).0
+}
+
 struct AppState {
     config: Mutex<AppConfig>,
     config_path: PathBuf,
@@ -132,9 +139,9 @@ struct AppState {
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
     stream_health: Mutex<HashMap<String, StreamHealth>>, // camera_id -> health stats
-    frame_broadcasters: Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<Arc<Vec<u8>>>>>>, // camera_id -> frame broadcaster (Arc to avoid cloning ~200KB per frame)
-    init_segments: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>, // camera_id -> cached ftyp+moov initialization segment
-    recent_segments: Arc<Mutex<HashMap<String, VecDeque<Arc<Vec<u8>>>>>>, // camera_id -> cached fragments from last keyframe (for instant client startup)
+    frame_broadcasters: Mutex<HashMap<String, FrameSender>>, // camera_id -> frame broadcaster
+    init_segments: Mutex<HashMap<String, Segment>>, // camera_id -> cached ftyp+moov initialization segment
+    recent_segments: Mutex<HashMap<String, VecDeque<Segment>>>, // camera_id -> cached fragments from last keyframe (for instant client startup)
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -185,14 +192,14 @@ fn stream_targets(camera: &Camera) -> Vec<(String, String)> {
 /// Spawn one retrying stream task per stream target, keyed by stream id.
 fn spawn_camera_streams(
     app: &AppHandle,
-    ffmpeg_path: &PathBuf,
+    ffmpeg_path: &Path,
     cameras: &[Camera],
     tasks: &mut HashMap<String, tauri::async_runtime::JoinHandle<()>>,
 ) {
     for camera in cameras {
         for (stream_id, url) in stream_targets(camera) {
             let app_handle = app.clone();
-            let ffmpeg = ffmpeg_path.clone();
+            let ffmpeg = ffmpeg_path.to_path_buf();
             let id = stream_id.clone();
             let handle = tauri::async_runtime::spawn(async move {
                 stream_camera(app_handle, ffmpeg, id, url).await;
@@ -267,15 +274,6 @@ fn stop_all_streams(state: &AppState, app: &AppHandle) {
 }
 
 #[tauri::command]
-fn solo_camera(_state: State<AppState>, _app: AppHandle, camera_id: String) {
-    // Keep all streams running in solo mode for instant grid recovery.
-    // H.264 copy uses minimal CPU; the frontend simply hides non-solo tiles.
-    // The broadcast channel's receiver_count check skips sending when no HTTP
-    // clients are connected, so background streams have near-zero overhead.
-    info!("Solo mode activated: camera {}", camera_id);
-}
-
-#[tauri::command]
 fn get_stream_health(state: State<AppState>) -> Result<HashMap<String, StreamHealth>, String> {
     let health = state.stream_health.lock()
         .map_err(|_| "stream_health mutex poisoned".to_string())?
@@ -285,84 +283,69 @@ fn get_stream_health(state: State<AppState>) -> Result<HashMap<String, StreamHea
 
 // ── Camera Streaming ─────────────────────────────────────────────────────────
 
-/// Build codec args for fMP4 output with H.264 copy (no transcode)
-fn build_h264_copy_args() -> Vec<String> {
-    vec![
-        "-c:v".to_string(),
-        "copy".to_string(),
-        "-f".to_string(),
-        "mp4".to_string(),
-        "-movflags".to_string(),
-        "frag_keyframe+empty_moov+default_base_moof".to_string(),
-        "-frag_duration".to_string(),
-        "50000".to_string(), // 50ms fragments for ultra-fast startup
-        "-min_frag_duration".to_string(),
-        "50000".to_string(),
-        "-flush_packets".to_string(),
-        "1".to_string(), // Force immediate writes to stdout
-        "-an".to_string(), // No audio
-    ]
+/// Output args: copy the video (no transcode) into fragmented MP4 for MSE.
+const COPY_TO_FMP4_ARGS: &[&str] = &[
+    "-c:v", "copy",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+    "-frag_duration", "50000", // 50ms fragments for ultra-fast startup
+    "-min_frag_duration", "50000",
+    "-flush_packets", "1", // Force immediate writes to stdout
+    "-an", // No audio
+];
+
+/// The boxes laid end to end in `data`, as (type, whole box including its
+/// header). Stops at the first box whose size doesn't fit.
+fn mp4_boxes(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        let size = be_u32(data, offset)? as usize;
+        if size < 8 || offset + size > data.len() { return None; }
+        let mp4_box = &data[offset..offset + size];
+        offset += size;
+        Some((&mp4_box[4..8], mp4_box))
+    })
+}
+
+fn be_u32(data: &[u8], at: usize) -> Option<u32> {
+    data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// The children of every traf box inside a moof (`moof` starts with the moof header).
+fn traf_children(moof: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+    mp4_boxes(moof.get(8..).unwrap_or_default())
+        .filter(|(kind, _)| *kind == b"traf")
+        .flat_map(|(_, traf)| mp4_boxes(&traf[8..]))
 }
 
 /// Check if a moof box contains a keyframe (sync sample) by parsing traf→tfhd/trun flags.
 /// Used to cache fragments from the last keyframe for instant client startup.
-fn is_keyframe_fragment(moof_data: &[u8]) -> bool {
-    if moof_data.len() < 16 { return false; }
-    let mut offset = 8; // skip moof box header
-
-    while offset + 8 <= moof_data.len() {
-        let box_size = u32::from_be_bytes([
-            moof_data[offset], moof_data[offset+1], moof_data[offset+2], moof_data[offset+3]
-        ]) as usize;
-        let box_type = &moof_data[offset+4..offset+8];
-        if box_size < 8 || offset + box_size > moof_data.len() { break; }
-
-        if box_type == b"traf" {
-            let mut traf_off = offset + 8;
-            let mut default_flags: Option<u32> = None;
-
-            while traf_off + 8 <= offset + box_size {
-                let child_size = u32::from_be_bytes([
-                    moof_data[traf_off], moof_data[traf_off+1], moof_data[traf_off+2], moof_data[traf_off+3]
-                ]) as usize;
-                let child_type = &moof_data[traf_off+4..traf_off+8];
-                if child_size < 8 || traf_off + child_size > offset + box_size { break; }
-
-                if child_type == b"tfhd" && child_size >= 16 {
-                    let tfhd_flags = u32::from_be_bytes([0, moof_data[traf_off+9], moof_data[traf_off+10], moof_data[traf_off+11]]);
-                    let mut foff = traf_off + 16; // past header(8) + version/flags(4) + track_id(4)
-                    if tfhd_flags & 0x000001 != 0 { foff += 8; } // base_data_offset
-                    if tfhd_flags & 0x000002 != 0 { foff += 4; } // sample_description_index
-                    if tfhd_flags & 0x000008 != 0 { foff += 4; } // default_sample_duration
-                    if tfhd_flags & 0x000010 != 0 { foff += 4; } // default_sample_size
-                    if tfhd_flags & 0x000020 != 0 && foff + 4 <= traf_off + child_size {
-                        default_flags = Some(u32::from_be_bytes([
-                            moof_data[foff], moof_data[foff+1], moof_data[foff+2], moof_data[foff+3]
-                        ]));
-                    }
-                }
-
-                if child_type == b"trun" && child_size >= 12 {
-                    let trun_flags = u32::from_be_bytes([0, moof_data[traf_off+9], moof_data[traf_off+10], moof_data[traf_off+11]]);
-                    let mut toff = traf_off + 16; // past header(8) + version/flags(4) + sample_count(4)
-                    if trun_flags & 0x000001 != 0 { toff += 4; } // data_offset
-                    if trun_flags & 0x000004 != 0 && toff + 4 <= traf_off + child_size {
-                        // first_sample_flags present — authoritative for first sample
-                        let flags = u32::from_be_bytes([moof_data[toff], moof_data[toff+1], moof_data[toff+2], moof_data[toff+3]]);
-                        return (flags >> 16) & 1 == 0; // sample_is_non_sync_sample == 0 → keyframe
-                    }
-                    // Fall back to default_sample_flags from tfhd
-                    if let Some(df) = default_flags {
-                        return (df >> 16) & 1 == 0;
-                    }
-                    return true; // No explicit flags — assume keyframe (conservative)
-                }
-
-                traf_off += child_size;
+fn is_keyframe_fragment(moof: &[u8]) -> bool {
+    // sample_is_non_sync_sample (bit 16) clear → keyframe
+    let is_sync = |sample_flags: u32| (sample_flags >> 16) & 1 == 0;
+    let mut default_flags = None;
+    for (kind, child) in traf_children(moof) {
+        let flags = be_u32(child, 8).unwrap_or(0) & 0x00FF_FFFF;
+        if kind == b"tfhd" {
+            // Optional fields before default_sample_flags, past header(8) + version/flags(4) + track_id(4):
+            // base_data_offset, sample_description_index, default_sample_duration, default_sample_size
+            let offset = [(0x01, 8), (0x02, 4), (0x08, 4), (0x10, 4)].iter()
+                .filter(|(bit, _)| flags & bit != 0)
+                .fold(16, |off, (_, len)| off + len);
+            if flags & 0x20 != 0 {
+                default_flags = be_u32(child, offset);
             }
+        } else if kind == b"trun" {
+            // first_sample_flags is authoritative for the first sample; it sits past
+            // header(8) + version/flags(4) + sample_count(4) [+ data_offset(4)]
+            let first = if flags & 0x04 != 0 {
+                be_u32(child, if flags & 0x01 != 0 { 20 } else { 16 })
+            } else {
+                None
+            };
+            // No explicit flags — assume keyframe (conservative)
+            return first.or(default_flags).is_none_or(is_sync);
         }
-
-        offset += box_size;
     }
     false
 }
@@ -388,41 +371,12 @@ fn should_forward(msg: &[u8], waiting_for_keyframe: &mut bool) -> bool {
 /// Count the total number of video samples (frames) declared in all trun boxes
 /// inside a moof box. This gives the exact frame count for the following mdat,
 /// which may contain multiple frames when frag_duration > one frame period.
-fn count_samples_in_moof(moof_data: &[u8]) -> u64 {
-    if moof_data.len() < 8 { return 1; }
-    let mut total: u64 = 0;
-    let mut offset = 8; // skip moof box header
-
-    while offset + 8 <= moof_data.len() {
-        let box_size = u32::from_be_bytes([
-            moof_data[offset], moof_data[offset+1], moof_data[offset+2], moof_data[offset+3]
-        ]) as usize;
-        let box_type = &moof_data[offset+4..offset+8];
-        if box_size < 8 || offset + box_size > moof_data.len() { break; }
-
-        if box_type == b"traf" {
-            let mut traf_off = offset + 8;
-            while traf_off + 8 <= offset + box_size {
-                let child_size = u32::from_be_bytes([
-                    moof_data[traf_off], moof_data[traf_off+1],
-                    moof_data[traf_off+2], moof_data[traf_off+3]
-                ]) as usize;
-                let child_type = &moof_data[traf_off+4..traf_off+8];
-                if child_size < 8 || traf_off + child_size > offset + box_size { break; }
-
-                // trun: version/flags(4) + sample_count(4) starting at offset+8
-                if child_type == b"trun" && child_size >= 16 {
-                    let sample_count = u32::from_be_bytes([
-                        moof_data[traf_off+12], moof_data[traf_off+13],
-                        moof_data[traf_off+14], moof_data[traf_off+15]
-                    ]);
-                    total += sample_count as u64;
-                }
-                traf_off += child_size;
-            }
-        }
-        offset += box_size;
-    }
+fn count_samples_in_moof(moof: &[u8]) -> u64 {
+    let total: u64 = traf_children(moof)
+        .filter(|(kind, _)| *kind == b"trun")
+        .filter_map(|(_, trun)| be_u32(trun, 12)) // sample_count, past header + version/flags
+        .map(u64::from)
+        .sum();
     total.max(1) // always count at least 1 to avoid stalling on malformed boxes
 }
 
@@ -691,12 +645,12 @@ fn build_input_args(url: &str, multicast_iface: Option<&str>) -> (Vec<String>, S
     (args, input_url)
 }
 
-/// Spawns ffmpeg for a single camera, reads JPEG frames from its stdout,
-/// and broadcasts each frame to HTTP MJPEG stream clients.
+/// Spawns FFmpeg for one stream, reads fMP4 from its stdout and broadcasts
+/// it to the local HTTP stream clients.
 async fn try_stream_camera(
     app: &AppHandle,
     state: &tauri::State<'_, AppState>,
-    ffmpeg_path: &PathBuf,
+    ffmpeg_path: &Path,
     camera_id: &str,
     url: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -713,10 +667,7 @@ async fn try_stream_camera(
     {
         let mut broadcasters = state.frame_broadcasters.lock().unwrap();
         broadcasters.entry(camera_id.to_string())
-            .or_insert_with(|| {
-                info!("Created frame broadcaster for camera: {}", camera_id);
-                tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0
-            });
+            .or_insert_with(frame_channel);
     }
 
     let mut args: Vec<String> = vec![
@@ -733,11 +684,7 @@ async fn try_stream_camera(
     args.extend(input_args);
     args.extend(["-i".into(), input_url]);
 
-    // Always use H.264 copy → fMP4 output (no transcoding)
-    let codec_args = build_h264_copy_args();
-    for arg in codec_args {
-        args.push(arg);
-    }
+    args.extend(COPY_TO_FMP4_ARGS.iter().map(|a| a.to_string()));
     args.push("pipe:1".to_string());
 
     let mut cmd = Command::new(ffmpeg_path);
@@ -782,7 +729,6 @@ async fn try_stream_camera(
                 frame_count: 0,
                 last_frame_at: 0,
                 uptime_secs: 0,
-                resolution: None,
                 codec: "detecting…".to_string(),
             });
         }
@@ -842,7 +788,6 @@ async fn try_stream_camera(
                 // Only reflects time of actual frame receipt; stays 0 until first frame arrives.
                 last_frame_at: health_last_frame_at.load(Ordering::Relaxed),
                 uptime_secs: uptime,
-                resolution: None,
                 codec,
             };
 
@@ -885,11 +830,6 @@ async fn try_stream_camera(
         AbortOnDrop::new(move || h.abort())
     });
 
-    // Clone Arc references before passing to stream processing
-    let frame_count_clone = frame_count.clone();
-    let bytes_received_clone = bytes_received.clone();
-    let last_frame_at_clone = last_frame_at.clone();
-
     // Process fMP4 stream (H.264 copy, MSE-ready).
     // _health_guard and _stderr_guard are RAII — they abort their tasks
     // automatically when this function returns (normally, via error, or cancellation).
@@ -897,10 +837,10 @@ async fn try_stream_camera(
         stdout,
         state,
         camera_id,
-        &app,
-        frame_count_clone,
-        bytes_received_clone,
-        last_frame_at_clone,
+        app,
+        &frame_count,
+        &bytes_received,
+        &last_frame_at,
     ).await;
 
     // Remove health entry on every exit path, so the panel never shows a dead stream's numbers
@@ -935,9 +875,9 @@ async fn process_fmp4_stream(
     state: &tauri::State<'_, AppState>,
     camera_id: &str,
     app: &AppHandle,
-    frame_count: Arc<AtomicU64>,
-    bytes_received: Arc<AtomicU64>,
-    last_frame_at: Arc<AtomicU64>,
+    frame_count: &AtomicU64,
+    bytes_received: &AtomicU64,
+    last_frame_at: &AtomicU64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = vec![0u8; 131_072]; // 128 KB read buffer
     let mut pending = Vec::new();
@@ -985,7 +925,7 @@ async fn process_fmp4_stream(
             let box_type_str = std::str::from_utf8(&box_type).unwrap_or("????");
 
             // Validate box size
-            if box_size < 8 || box_size > 50 * 1024 * 1024 {
+            if !(8..=50 * 1024 * 1024).contains(&box_size) {
                 error!("Invalid MP4 box size {} for {}, resetting buffer", box_size, camera_id);
                 pending.clear();
                 fragment_buffer.clear();
@@ -1131,7 +1071,7 @@ fn multicast_interface(state: &AppState) -> Option<String> {
 fn valid_multicast_interface(value: &str) -> bool {
     let value = value.trim();
     value.is_empty()
-        || value.parse::<std::net::Ipv4Addr>().map_or(false, |ip| {
+        || value.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| {
             !ip.is_multicast() && !ip.is_unspecified() && !ip.is_broadcast()
         })
 }
@@ -1205,8 +1145,6 @@ fn start_mdns(port: u16) -> Option<ServiceDaemon> {
 
 // ── Network Command API ──────────────────────────────────────────────────────
 
-/// Lightweight HTTP API server for remote control (Stream Deck / Companion).
-/// Listens on the configured port and forwards commands to the frontend via events.
 /// Split an HTTP request target into path and optional query string.
 fn split_path_query(target: &str) -> (&str, Option<&str>) {
     match target.split_once('?') {
@@ -1230,6 +1168,8 @@ fn token_ok(query: Option<&str>, expected: &str) -> bool {
         && given.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
+/// Lightweight HTTP API server for remote control (Stream Deck / Companion).
+/// Listens on the configured port and forwards commands to the frontend via events.
 async fn run_api_server(app: AppHandle, port: u16) {
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
@@ -1308,7 +1248,7 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     let mut rx = {
                         let mut broadcasters = state_ref.frame_broadcasters.lock().unwrap();
                         let sender = broadcasters.entry(camera_id.clone())
-                            .or_insert_with(|| tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(60).0);
+                            .or_insert_with(frame_channel);
                         sender.subscribe()
                     };
 
@@ -1339,7 +1279,7 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     // This gives the browser a decodable keyframe immediately instead of
                     // waiting up to GOP-length (1-3 seconds) for the next live keyframe.
                     {
-                        let cached_fragments: Vec<Arc<Vec<u8>>> = state_ref.recent_segments.lock()
+                        let cached_fragments: Vec<Segment> = state_ref.recent_segments.lock()
                             .ok()
                             .and_then(|cache| cache.get(&camera_id).map(|q| q.iter().cloned().collect()))
                             .unwrap_or_default();
@@ -1437,13 +1377,12 @@ async fn run_api_server(app: AppHandle, port: u16) {
                     }
                 }
             } else if path == "/api/fullscreen" {
-                match api_fullscreen(app_handle.clone()).await {
+                match api_fullscreen(&app_handle) {
                     Ok(result) => ("200 OK", result.to_string()),
                     Err(e) => ("500 Internal Server Error", serde_json::json!({"ok": false, "error": e}).to_string()),
                 }
             } else if path == "/api/reload" {
-                let state = app_handle.state::<AppState>();
-                match api_reload(app_handle.clone(), state).await {
+                match api_reload(&app_handle) {
                     Ok(result) => ("200 OK", result.to_string()),
                     Err(e) => ("500 Internal Server Error", serde_json::json!({"ok": false, "error": e}).to_string()),
                 }
@@ -1508,75 +1447,30 @@ fn write_config(path: &Path, config: &AppConfig) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+/// The FFmpeg to run: the bundled sidecar next to the exe (where Tauri puts
+/// it), the dev copy in src-tauri/binaries, or whatever is on PATH.
+fn get_ffmpeg_path() -> PathBuf {
+    let sidecar = std::env::current_exe().ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })));
 
-
-/// Returns the path to the FFmpeg binary (bundled or system).
-fn get_ffmpeg_path(app: Option<&AppHandle>) -> PathBuf {
-    // If we have app handle, use Tauri's proper resource resolution
-    if let Some(app_handle) = app {
-        // Try to resolve as a bundled resource
-        // In production, Tauri places sidecar binaries in the resource directory
-        let binary_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-        
-        if let Ok(resource_path) = app_handle.path().resolve(binary_name, tauri::path::BaseDirectory::Resource) {
-            if resource_path.exists() {
-                info!("Found FFmpeg via Tauri resource resolver: {}", resource_path.display());
-                return resource_path;
-            }
-        }
-        
-        // Also check next to the executable (alternative location)
-        if let Ok(current_exe) = std::env::current_exe() {
-            if let Some(exe_dir) = current_exe.parent() {
-                let sidecar_path = exe_dir.join(binary_name);
-                if sidecar_path.exists() {
-                    info!("Found FFmpeg next to exe: {}", sidecar_path.display());
-                    return sidecar_path;
-                }
-            }
-        }
-    }
-    
-    let exe_dir = std::env::current_exe()
-        .unwrap_or_default()
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .to_path_buf();
-
-    // Dev: in src-tauri/binaries/ (next to Cargo.toml)
     let dev_binary_name = if cfg!(windows) {
         "ffmpeg-x86_64-pc-windows-msvc.exe".to_string()
     } else {
-        let arch = std::env::consts::ARCH;
-        let os_target = if cfg!(target_os = "macos") {
-            "apple-darwin"
-        } else {
-            "unknown-linux-gnu"
-        };
-        format!("ffmpeg-{}-{}", arch, os_target)
+        let os_target = if cfg!(target_os = "macos") { "apple-darwin" } else { "unknown-linux-gnu" };
+        format!("ffmpeg-{}-{}", std::env::consts::ARCH, os_target)
     };
-    let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(dev_binary_name);
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join(dev_binary_name);
 
-    // Production: Tauri places sidecar binaries directly next to the exe  
-    let prod_sidecar = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
-
-    if dev_path.exists() {
-        info!("Found FFmpeg in dev binaries: {}", dev_path.display());
-        dev_path
-    } else if prod_sidecar.exists() {
-        info!("Found FFmpeg next to exe: {}", prod_sidecar.display());
-        prod_sidecar
-    } else {
-        warn!("FFmpeg not found in expected locations, falling back to PATH");
-        PathBuf::from("ffmpeg")
+    match [sidecar, Some(dev)].into_iter().flatten().find(|p| p.exists()) {
+        Some(path) => path,
+        None => {
+            warn!("FFmpeg not found next to the exe or in src-tauri/binaries, falling back to PATH");
+            PathBuf::from("ffmpeg")
+        }
     }
 }
 
-#[tauri::command]
-async fn api_fullscreen(app: AppHandle) -> Result<serde_json::Value, String> {
+fn api_fullscreen(app: &AppHandle) -> Result<serde_json::Value, String> {
     let window = app.get_webview_window("main")
         .ok_or("Main window not found")?;
 
@@ -1593,39 +1487,17 @@ async fn api_fullscreen(app: AppHandle) -> Result<serde_json::Value, String> {
     }))
 }
 
-#[tauri::command]
-async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+/// Stop the streams and reload the config from disk. The frontend reloads on
+/// "reload-config" and starts the streams for the new camera list itself.
+fn api_reload(app: &AppHandle) -> Result<serde_json::Value, String> {
     info!("API reload requested");
-
-    stop_all_streams(&state, &app);
-
-    // Reload config from disk
+    let state = app.state::<AppState>();
+    stop_all_streams(&state, app);
     let (config, _) = load_config();
-
-    // Update in-memory config
-    let cameras = config.cameras.clone();
-    let ffmpeg_path = state.ffmpeg_path.clone();
-    {
-        let mut cfg = state.config.lock()
-            .map_err(|_| "Config mutex poisoned")?;
-        *cfg = config;
-    }
-
+    *state.config.lock().map_err(|_| "Config mutex poisoned")? = config;
     info!("Config reloaded from disk");
-
-    // Start streams for new config
-    {
-        let mut tasks = state.stream_tasks.lock().map_err(|_| "stream_tasks mutex poisoned")?;
-        spawn_camera_streams(&app, &ffmpeg_path, &cameras, &mut tasks);
-    }
-
-    // Emit reload event to frontend
-    let _ = app.emit("reload-config", serde_json::json!({"ok": true}));
-
-    Ok(serde_json::json!({
-        "ok": true,
-        "action": "reload"
-    }))
+    let _ = app.emit("reload-config", ());
+    Ok(serde_json::json!({"ok": true, "action": "reload"}))
 }
 
 // ── App Entry ────────────────────────────────────────────────────────────────
@@ -1666,10 +1538,7 @@ fn cleanup_old_logs(log_dir: &std::path::Path, max_age_days: u64) {
 /// of the application, otherwise logging will stop when it's dropped.
 fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
     // Create logs directory
-    let log_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("StageView")
-        .join("logs");
+    let log_dir = config_dir().join("logs");
 
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!("Warning: Failed to create logs directory at {}: {}. Logging may not work.",
@@ -1710,7 +1579,7 @@ pub fn run() {
             let window_state = config.window_state.clone();
 
             // Resolve bundled ffmpeg binary path using Tauri's API
-            let ffmpeg_path = get_ffmpeg_path(Some(&app.handle()));
+            let ffmpeg_path = get_ffmpeg_path();
             info!("Using ffmpeg at: {}", ffmpeg_path.display());
 
             app.manage(AppState {
@@ -1720,9 +1589,9 @@ pub fn run() {
                 stream_tasks: Mutex::new(HashMap::new()),
                 reconnect_attempts: Mutex::new(HashMap::new()),
                 stream_health: Mutex::new(HashMap::new()),
-                frame_broadcasters: Arc::new(Mutex::new(HashMap::new())),
-                init_segments: Arc::new(Mutex::new(HashMap::new())),
-                recent_segments: Arc::new(Mutex::new(HashMap::new())),
+                frame_broadcasters: Mutex::new(HashMap::new()),
+                init_segments: Mutex::new(HashMap::new()),
+                recent_segments: Mutex::new(HashMap::new()),
             });
 
             // Restore window position and size with off-screen validation
@@ -1776,12 +1645,9 @@ pub fn run() {
             save_config,
             start_streams,
             stop_streams,
-            solo_camera,
             default_multicast_interface,
             is_dev_build,
             get_stream_health,
-            api_fullscreen,
-            api_reload,
         ])
         .run(tauri::generate_context!())
         .expect("Failed to launch StageView");
@@ -1836,6 +1702,33 @@ mod tests {
     fn test_fragment_helper_matches_keyframe_parser() {
         assert!(is_keyframe_fragment(&test_fragment(true)));
         assert!(!is_keyframe_fragment(&test_fragment(false)));
+    }
+
+    /// A moof whose trun has no first_sample_flags, so tfhd's default_sample_flags decide.
+    fn moof_with_default_flags(sample_flags: u32, sample_count: u32) -> Vec<u8> {
+        let mut tfhd = vec![0, 0, 0, 0x20]; // flags = default_sample_flags present
+        tfhd.extend_from_slice(&1u32.to_be_bytes()); // track_id
+        tfhd.extend_from_slice(&sample_flags.to_be_bytes());
+        let mut trun = vec![0, 0, 0, 0];
+        trun.extend_from_slice(&sample_count.to_be_bytes());
+        let mut traf = test_box(b"tfhd", &tfhd);
+        traf.extend(test_box(b"trun", &trun));
+        test_box(b"moof", &test_box(b"traf", &traf))
+    }
+
+    #[test]
+    fn keyframe_falls_back_to_tfhd_default_flags() {
+        assert!(is_keyframe_fragment(&moof_with_default_flags(0x0200_0000, 1)));
+        assert!(!is_keyframe_fragment(&moof_with_default_flags(0x0101_0000, 1)));
+    }
+
+    #[test]
+    fn counts_samples_across_trafs() {
+        assert_eq!(count_samples_in_moof(&moof_with_default_flags(0, 3)), 3);
+        let mut two = moof_with_default_flags(0, 3)[8..].to_vec(); // traf only
+        two.extend_from_slice(&moof_with_default_flags(0, 2)[8..]);
+        assert_eq!(count_samples_in_moof(&test_box(b"moof", &two)), 5);
+        assert_eq!(count_samples_in_moof(b"garbage"), 1, "malformed input still counts one");
     }
 
     #[test]

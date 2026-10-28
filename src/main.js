@@ -42,7 +42,6 @@ class Mp4StreamReader {
     this.running = false;
     this._firstFrame = false;
     this.onFirstFrame = null;
-    this.onError = null;
     this.queue = []; // Buffer queue for segments
     this.isUpdating = false;
     this._trimTimer = null; // Periodic buffer trimming
@@ -56,7 +55,7 @@ class Mp4StreamReader {
     this.onUnsupportedCodec = null;
 
     // Bind video event handlers so they can be removed on restart
-    this._onVideoError = (e) => {
+    this._onVideoError = () => {
       const msg = this.video.error?.message || '';
       // MSE parsing errors are recoverable — restart the pipeline
       if (msg.includes('CHUNK_DEMUXER') || msg.includes('PIPELINE_ERROR')
@@ -64,7 +63,7 @@ class Mp4StreamReader {
         console.warn('[Mp4StreamReader] Recoverable video error, restarting pipeline:', msg);
         this._restart();
       } else {
-        if (this.onError) this.onError(msg || 'Video playback error');
+        console.error('[Mp4StreamReader] Video error:', msg);
       }
     };
     this._onVideoWaiting = () => this._chaseLiveEdge();
@@ -80,7 +79,6 @@ class Mp4StreamReader {
     // Check for MSE support
     if (!window.MediaSource) {
       console.error('MediaSource API not supported in this browser');
-      if (this.onError) this.onError('MediaSource API not supported');
       return;
     }
 
@@ -102,7 +100,7 @@ class Mp4StreamReader {
       this._ensureSourceBuffer();
     });
 
-    this.mediaSource.addEventListener('error', (e) => {
+    this.mediaSource.addEventListener('error', () => {
       console.warn('[Mp4StreamReader] MediaSource error, restarting pipeline');
       this._restart();
     });
@@ -163,64 +161,46 @@ class Mp4StreamReader {
 
       this._processQueue();
     } catch (e) {
-      if (this.onError) this.onError('Failed to create SourceBuffer');
+      console.error('[Mp4StreamReader] Failed to create SourceBuffer:', e);
     }
   }
 
   /**
-   * Capture the current video frame onto a canvas overlay so the user
-   * sees the last good frame while the MSE pipeline is being rebuilt.
-   * The canvas is placed inside the same tile parent as the <video>.
+   * Draw the current video frame onto the freeze canvas (created on first use
+   * inside the tile). Returns false when there is no frame to draw.
    */
-  _captureFrame() {
-    if (!this.video || this.video.readyState < 2 || this.video.videoWidth === 0) return;
+  _drawFreezeFrame() {
+    if (!this.video || this.video.readyState < 2 || this.video.videoWidth === 0) return false;
+    const tile = this.video.parentElement;
+    if (!tile) return false;
     try {
-      const tile = this.video.parentElement;
-      if (!tile) return;
-
       if (!this._freezeCanvas) {
         this._freezeCanvas = document.createElement('canvas');
         this._freezeCanvas.className = 'freeze-frame';
         tile.appendChild(this._freezeCanvas);
       }
-
       this._freezeCanvas.width = this.video.videoWidth;
       this._freezeCanvas.height = this.video.videoHeight;
-      const ctx = this._freezeCanvas.getContext('2d');
-      ctx.drawImage(this.video, 0, 0);
-      this._freezeCanvas.style.display = 'block';
+      this._freezeCanvas.getContext('2d').drawImage(this.video, 0, 0);
+      return true;
     } catch (e) {
-      // Canvas draw can fail if video is tainted — ignore silently
+      return false; // Canvas draw can fail if video is tainted
     }
   }
 
+  /** Show the last frame while the MSE pipeline is being rebuilt. */
+  _captureFrame() {
+    if (this._drawFreezeFrame()) this._freezeCanvas.style.display = 'block';
+  }
+
   /**
-   * Periodically snapshot a known-good frame (every ~10s) so that when
-   * corruption is detected, we have a recent clean frame to show.
-   * Only captures if no corruption has been detected recently.
-   * Cost: one drawImage every 10s per camera — negligible.
+   * Keep a known-good frame (at most every 10 s, not shown) so that when
+   * corruption is detected there is a recent clean frame to cover it.
    */
   _captureGoodFrame() {
-    if (!this.video || this.video.readyState < 2 || this.video.videoWidth === 0) return;
     const now = Date.now();
-    if (now - this._lastGoodFrameAt < 10000) return; // Max once per 10s
-    try {
-      const tile = this.video.parentElement;
-      if (!tile) return;
-
-      if (!this._freezeCanvas) {
-        this._freezeCanvas = document.createElement('canvas');
-        this._freezeCanvas.className = 'freeze-frame';
-        tile.appendChild(this._freezeCanvas);
-      }
-
-      this._freezeCanvas.width = this.video.videoWidth;
-      this._freezeCanvas.height = this.video.videoHeight;
-      const ctx = this._freezeCanvas.getContext('2d');
-      ctx.drawImage(this.video, 0, 0);
-      // Don't display it — just keep it ready
-      this._lastGoodFrameAt = now;
-    } catch (e) { /* ignore */ }
+    if (now - this._lastGoodFrameAt < 10000) return;
+    if (this._drawFreezeFrame()) this._lastGoodFrameAt = now;
   }
 
   /**
@@ -387,7 +367,6 @@ class Mp4StreamReader {
     this.abortController = abort;
     this.running = true;
     let retryDelay = 1000;
-    let bytesReceived = 0;
 
     while (this.running && !abort.signal.aborted) {
       try {
@@ -400,25 +379,11 @@ class Mp4StreamReader {
         const reader = response.body.getReader();
         retryDelay = 1000;
 
-        // Start a 15s first-data timeout. If no bytes arrive within 15s
-        // of a successful HTTP connection, the stream source is likely
-        // offline (FFmpeg waiting for multicast data that never comes).
-        let firstDataTimer = null;
-        if (!this._firstFrame) {
-          firstDataTimer = setTimeout(() => {
-            if (!this._firstFrame && this.running) {
-              if (this.onError) this.onError('No data received — camera may be offline');
-            }
-          }, 15000);
-        }
-
         while (this.running) {
           const { done, value } = await reader.read();
           if (done) break;
 
           if (value && value.byteLength > 0) {
-            bytesReceived += value.byteLength;
-            
             this.queue.push(value);
             this._ensureSourceBuffer();
             this._processQueue();
@@ -426,7 +391,6 @@ class Mp4StreamReader {
             // Trigger first-frame callback and eagerly play
             if (this.sourceBuffer && !this._firstFrame) {
               this._firstFrame = true;
-              if (firstDataTimer) { clearTimeout(firstDataTimer); firstDataTimer = null; }
               this.video.play().catch(() => {});
               // Defer freeze-frame removal until video actually renders
               this._scheduleFreezeRemoval();
@@ -436,9 +400,6 @@ class Mp4StreamReader {
         }
       } catch (e) {
         if (e.name === 'AbortError' || !this.running) return;
-        if (this.onError && bytesReceived === 0) {
-          this.onError('Stream connection failed');
-        }
       }
 
       if (!this.running || abort.signal.aborted) return;
@@ -570,8 +531,6 @@ class StageView {
     this.shuffleTimerId = null;
     this._noiseDataUrl = null; // cached noise texture for pixel refresh
     this.nextShuffleAt = 0;
-    this.unlistenStatus = null;
-    this.unlistenCommand = null;
     this.soloIndex = null; // null = grid view, number = 1-based solo index
     this.pixelShiftIndex = 0; // cycles through shift positions for burn-in protection
     this._outsideClickHandler = null; // single handler for camera menu outside clicks
@@ -582,7 +541,7 @@ class StageView {
     this.streamReaders = new Map(); // camera_id -> Mp4StreamReader
     this._countdownTimer = null;
     this._idleTimer = null;
-    this._isIdle = false;
+    this._activeErrorToasts = new Map(); // stream id -> true while its error toast shows
     this._pendingUpdate = null; // cached update object from plugin-updater
     this._updatePromptTimer = null; // 1 s tick that closes the update prompt after 10 minutes
     this._celebrationTimer = null;      // 1 s tick that closes the celebration by itself
@@ -605,7 +564,7 @@ class StageView {
       this.multicastInterface = config.multicast_interface || "";
 
       // Listen for camera status events (online / offline / error / connecting / reconnecting)
-      this.unlistenStatus = await listen("camera-status", (event) => {
+      await listen("camera-status", (event) => {
         const { camera_id, status } = event.payload;
 
         // Track status in Map so we can restore it after re-render
@@ -623,7 +582,7 @@ class StageView {
       });
 
       // Listen for remote commands from the API server
-      this.unlistenCommand = await listen("remote-command", (event) => {
+      await listen("remote-command", (event) => {
         const { command, index } = event.payload;
         if (command === "solo" && index >= 1 && index <= this.cameras.length) {
           this.soloCamera(index);
@@ -633,7 +592,7 @@ class StageView {
       });
 
       // Listen for stream health updates — update fps display directly, no debounce
-      this.unlistenHealth = await listen("stream-health", (event) => {
+      await listen("stream-health", (event) => {
         const { camera_id, health } = event.payload;
         this.healthStats.set(camera_id, health);
         // The first sample after a (re)start covers FFmpeg's start-up, not the
@@ -650,8 +609,7 @@ class StageView {
       });
 
       // Listen for stream errors (deduplicate per camera to prevent toast flood)
-      this._activeErrorToasts = this._activeErrorToasts || new Map();
-      this.unlistenStreamError = await listen("stream-error", (event) => {
+      await listen("stream-error", (event) => {
         const { camera_id, error } = event.payload;
         // Skip if a toast for this camera is already showing
         if (this._activeErrorToasts.has(camera_id)) return;
@@ -679,7 +637,7 @@ class StageView {
       }
 
       this.render();
-      this._startRenderLoop();
+      this._startCountdown();
       this.startShuffleTimer();
 
     } catch (err) {
@@ -748,12 +706,25 @@ class StageView {
     this.renderGridLayout(grid);
   }
 
-  renderGridLayout(grid) {
+  /** Near-square grid with room for every camera. */
+  applyGridColumns(grid) {
     const cols = Math.ceil(Math.sqrt(this.cameras.length));
     const rows = Math.ceil(this.cameras.length / cols);
     grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
     grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
-    grid.style.position = "";
+  }
+
+  /** Place tiles by displayOrder with CSS order (keeps the DOM, and the videos, in place). */
+  applyDisplayOrder(grid) {
+    grid.querySelectorAll(".camera-tile").forEach((tile) => {
+      const camIndex = this.cameras.findIndex(c => c.id === tile.dataset.id);
+      const orderPos = this.displayOrder.indexOf(camIndex);
+      tile.style.order = orderPos >= 0 ? orderPos : 0;
+    });
+  }
+
+  renderGridLayout(grid) {
+    this.applyGridColumns(grid);
 
     grid.innerHTML = this.displayOrder
       .map((index) => {
@@ -882,7 +853,7 @@ class StageView {
         this.showToast(`${cam.name}: ${name} (${codec}) is not supported by this PC's video decoder`, 'error');
       };
 
-      // No onError handler — transient MSE/stream errors are auto-recovered
+      // Transient MSE/stream errors are auto-recovered
       // by the pipeline restart logic. Only true failures (3+ backend retries)
       // show a toast via the "stream-error" Tauri event.
 
@@ -905,22 +876,9 @@ class StageView {
     });
   }
 
-  // ── Canvas Rendering Helpers ────────────────────────────────────────────
-
-  _startRenderLoop() {
+  _startCountdown() {
     if (this._countdownTimer) return;
-    // Countdown only needs 1 update per second.
-    // MSE handles video rendering automatically — no manual draw() needed.
-    this._countdownTimer = setInterval(() => {
-      this.updateCountdown();
-    }, 1000);
-  }
-
-  _stopRenderLoop() {
-    if (this._countdownTimer) {
-      clearInterval(this._countdownTimer);
-      this._countdownTimer = null;
-    }
+    this._countdownTimer = setInterval(() => this.updateCountdown(), 1000);
   }
 
   _stopAllReaders() {
@@ -987,19 +945,12 @@ class StageView {
         [this.displayOrder[j], this.displayOrder[i]];
     }
 
-    // Apply visual reorder via CSS order (preserves DOM tree / canvas context)
-    const grid = document.getElementById("grid");
-    grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      const camId = tile.dataset.id;
-      const camIndex = this.cameras.findIndex(c => c.id === camId);
-      const orderPos = this.displayOrder.indexOf(camIndex);
-      tile.style.order = orderPos >= 0 ? orderPos : 0;
-    });
+    this.applyDisplayOrder(document.getElementById("grid"));
   }
 
   // ── Solo Camera Mode ────────────────────────────────────────────────────
 
-  async soloCamera(index) {
+  soloCamera(index) {
     if (index < 1 || index > this.cameras.length) return;
     const prevSolo = this.soloIndex !== null ? this.cameras[this.soloIndex - 1] : null;
     this.soloIndex = index;
@@ -1025,10 +976,6 @@ class StageView {
     // Switch grid to single cell
     grid.style.gridTemplateColumns = "1fr";
     grid.style.gridTemplateRows = "1fr";
-    grid.style.position = "";
-
-    // Notify backend (streams stay running for instant grid recovery)
-    await invoke("solo_camera", { cameraId: cam.id });
 
     this.updateToolbar();
 
@@ -1036,19 +983,16 @@ class StageView {
     this.startShuffleTimer();
   }
 
-  async exitSolo() {
+  exitSolo() {
     if (this.soloIndex === null) return;
     const soloCam = this.cameras[this.soloIndex - 1];
     this.soloIndex = null;
 
     const grid = document.getElementById("grid");
-    const cols = Math.ceil(Math.sqrt(this.cameras.length));
-    const rows = Math.ceil(this.cameras.length / cols);
 
     // Restore grid layout and show all tiles instantly (no DOM rebuild).
     // All stream readers stayed running, so cameras appear immediately.
-    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+    this.applyGridColumns(grid);
 
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
       tile.classList.remove("solo");
@@ -1057,13 +1001,7 @@ class StageView {
 
     if (soloCam) this._useStream(soloCam, false);
 
-    // Restore display order from shuffle state
-    grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      const camId = tile.dataset.id;
-      const camIndex = this.cameras.findIndex(c => c.id === camId);
-      const orderPos = this.displayOrder.indexOf(camIndex);
-      tile.style.order = orderPos >= 0 ? orderPos : 0;
-    });
+    this.applyDisplayOrder(grid);
 
     this.updateToolbar();
     this.closeCameraMenu();
@@ -1319,7 +1257,7 @@ class StageView {
         [...currentIds].every(id => existingIds.has(id));
 
       if (sameSet) {
-        this.refreshHealthStats();
+        this.updateHealthDisplay();
         return;
       }
       existingHealth.closest(".settings-section")?.remove();
@@ -1352,14 +1290,6 @@ class StageView {
     `;
 
     panel.insertAdjacentHTML('afterbegin', healthHTML);
-    this.refreshHealthStats();
-  }
-
-  async refreshHealthStats() {
-    // healthStats is kept current by the stream-health event listener.
-    // Just repaint from what we already have in memory — no Rust invocation needed.
-    // If no events have fired yet (stream just started), shows '--' until the
-    // next 2-second health tick arrives.
     this.updateHealthDisplay();
   }
 
@@ -1481,7 +1411,7 @@ class StageView {
     }
 
     try {
-      const { check } = window.__TAURI_PLUGIN_UPDATER__ || await import('@tauri-apps/plugin-updater');
+      const { check } = window.__TAURI_PLUGIN_UPDATER__;
       const update = await check();
       // A finished check counts for the day, whether or not there was an update
       await this.serializedConfigSave((cfg) => { cfg.last_update_check = Date.now(); return cfg; });
@@ -1966,7 +1896,6 @@ class StageView {
     const toolbar = document.getElementById('toolbar');
 
     const showUI = () => {
-      this._isIdle = false;
       toolbar.classList.add('visible');
       document.body.classList.remove('cursor-hidden');
 
@@ -1975,7 +1904,6 @@ class StageView {
     };
 
     const hideUI = () => {
-      this._isIdle = true;
       toolbar.classList.remove('visible');
       document.body.classList.add('cursor-hidden');
     };
