@@ -6,6 +6,31 @@
 
 const CHANGELOG = [
   {
+    version: '1.3.3',
+    changes: [
+      {
+        title: 'UDP and SRT cameras play',
+        detail: 'Cameras added with a udp:// or srt:// address now show video. Before, they stayed on the loading spinner.',
+      },
+      {
+        title: 'Calmer when a camera is unreachable',
+        detail: 'A camera that refuses the connection is retried less and less often instead of every second, and after a few tries you see a message saying what is wrong.',
+      },
+      {
+        title: 'Settings that stick',
+        detail: 'Camera names with quotes keep their full name, saving while one camera fills the screen brings the grid back, and changing the network port no longer blanks the video until a restart.',
+      },
+      {
+        title: 'Safer settings file',
+        detail: 'A power cut while saving can no longer wipe the camera list. A settings file that can\'t be read is kept as config.json.unreadable for recovery.',
+      },
+      {
+        title: 'The window remembers its place',
+        detail: 'Closing StageView while it is minimized no longer makes it forget where its window was.',
+      },
+    ],
+  },
+  {
     version: '1.3.1',
     changes: [
       {

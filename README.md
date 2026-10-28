@@ -4,7 +4,7 @@
 
 **Multi-camera grid viewer for live streaming & broadcast monitoring**
 
-[![Version](https://img.shields.io/badge/version-1.3.1-blue?style=flat-square)](https://github.com/yourusername/stageview/releases)
+[![Version](https://img.shields.io/badge/version-1.3.3-blue?style=flat-square)](https://github.com/yourusername/stageview/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#installation)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange?style=flat-square)](https://tauri.app)
@@ -51,7 +51,7 @@ Pre-built Windows installers are in `src-tauri/target/release/bundle/`:
 
 **Silent MSI install:**
 ```bash
-msiexec /i StageView_1.3.1_x64_en-US.msi /quiet
+msiexec /i StageView_1.3.3_x64_en-US.msi /quiet
 ```
 
 ### Build from Source
