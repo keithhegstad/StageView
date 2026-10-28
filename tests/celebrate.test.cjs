@@ -24,6 +24,7 @@ function setup({ devBuild, lastSeen }) {
   };
   const view = Object.create(StageView.prototype);
   view.appVersion = '1.3.0';
+  view._configSaveChain = Promise.resolve(); // set by the constructor in the app
   view.shown = null;
   view.showCelebration = (...args) => { view.shown = args; };
   return { view, calls, saved: () => saved };

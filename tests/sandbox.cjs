@@ -40,6 +40,7 @@ class FakeElement {
 
 function loadMain() {
   const fetched = [];
+  const elementsById = new Map();
   class FakeMediaSource {
     constructor() { this.readyState = 'closed'; }
     addEventListener() {}
@@ -47,7 +48,12 @@ function loadMain() {
   }
   const ctx = {
     window: { addEventListener() {}, MediaSource: FakeMediaSource },
-    document: { createElement: (tag) => new FakeElement(tag), querySelector: () => null },
+    document: {
+      createElement: (tag) => new FakeElement(tag),
+      querySelector: () => null,
+      // One element per id, created on first lookup
+      getElementById: (id) => elementsById.get(id) || elementsById.set(id, new FakeElement('div')).get(id),
+    },
     MediaSource: FakeMediaSource,
     URL: { createObjectURL: () => 'blob:fake', revokeObjectURL() {} },
     AbortController,
@@ -62,6 +68,8 @@ function loadMain() {
   return {
     Reader: vm.runInContext('Mp4StreamReader', ctx),
     StageView: vm.runInContext('StageView', ctx),
+    escapeHtml: vm.runInContext('escapeHtml', ctx),
+    elementsById,
     window: ctx.window, // set window.__TAURI__ to stand in for the backend
     fetched,
   };

@@ -18,10 +18,10 @@ function getAppVersion() {
   return window.__TAURI__.app.getVersion();
 }
 
+// Quotes too: the result also goes inside value="…" attributes
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  return String(str ?? '').replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
 
 const TRACE_W = 300;
@@ -234,7 +234,8 @@ class Mp4StreamReader {
     if (!quality) return;
 
     const corrupt = quality.corruptedVideoFrames || 0;
-    if (corrupt > this._lastCorruptedCount) {
+    const glitched = corrupt > this._lastCorruptedCount;
+    if (glitched) {
       console.warn(`[Mp4StreamReader] ${corrupt - this._lastCorruptedCount} corrupt frame(s) detected for ${this.url}`);
       // Show freeze canvas briefly to mask visible artifacts
       if (this._freezeCanvas && this._lastGoodFrameAt > 0) {
@@ -247,8 +248,9 @@ class Mp4StreamReader {
     }
     this._lastCorruptedCount = corrupt;
 
-    // Periodically capture a known-good frame for future use
-    if (corrupt === this._lastCorruptedCount) {
+    // Periodically capture a known-good frame for future use — never one
+    // from a tick that just saw corruption
+    if (!glitched) {
       this._captureGoodFrame();
     }
   }
@@ -314,6 +316,8 @@ class Mp4StreamReader {
     const delay = elapsed < 3000 ? 3000 - elapsed : 0;
 
     setTimeout(() => {
+      // Stopped while waiting (e.g. the grid was rebuilt): stay stopped
+      if (!this.running) { this._restarting = false; return; }
       this._lastRestartAt = Date.now();
       this._restartCount++;
       console.log(`[Mp4StreamReader] Pipeline restart #${this._restartCount} for ${this.url}`);
@@ -377,14 +381,17 @@ class Mp4StreamReader {
   async start() {
     if (!this.mediaSource) return;
 
-    this.abortController = new AbortController();
+    // This loop owns its controller: after a restart the next start() makes a
+    // new one, and this loop must end rather than fetch alongside it.
+    const abort = new AbortController();
+    this.abortController = abort;
     this.running = true;
     let retryDelay = 1000;
     let bytesReceived = 0;
 
-    while (this.running) {
+    while (this.running && !abort.signal.aborted) {
       try {
-        const response = await fetch(this.url, { signal: this.abortController.signal });
+        const response = await fetch(this.url, { signal: abort.signal });
         
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -434,7 +441,7 @@ class Mp4StreamReader {
         }
       }
 
-      if (!this.running) return;
+      if (!this.running || abort.signal.aborted) return;
       await new Promise(r => setTimeout(r, retryDelay));
       retryDelay = Math.min(retryDelay * 2, 5000);
     }
@@ -557,6 +564,7 @@ class StageView {
     this.showStatusDots = true;
     this.showCameraNames = true;
     this.apiPort = 8090;
+    this.streamPort = 8090; // port the API server actually bound at startup; apiPort may change until a restart
     this.apiToken = "";
     this.multicastInterface = "";
     this.shuffleTimerId = null;
@@ -570,7 +578,7 @@ class StageView {
     this.healthStats = new Map(); // camera_id -> health object
     this.healthHistory = new Map(); // stream id -> recent { fps, kbps } samples, oldest first
     this.cameraStatuses = new Map(); // camera_id -> status string (online/offline/connecting/reconnecting)
-    this._configSavePromise = null; // serializes config save operations
+    this._configSaveChain = Promise.resolve(); // serializes config save operations
     this.streamReaders = new Map(); // camera_id -> Mp4StreamReader
     this._countdownTimer = null;
     this._idleTimer = null;
@@ -592,6 +600,7 @@ class StageView {
       this.showStatusDots = config.show_status_dots !== false;
       this.showCameraNames = config.show_camera_names !== false;
       this.apiPort = config.api_port || 8090;
+      this.streamPort = this.apiPort;
       this.apiToken = config.api_token || "";
       this.multicastInterface = config.multicast_interface || "";
 
@@ -755,10 +764,9 @@ class StageView {
 
     this.bindTileEvents(grid);
 
-    // Restore camera status for any cameras that already have a known status
+    // Restore the last known status of the stream each tile is playing
     grid.querySelectorAll(".camera-tile").forEach((tile) => {
-      const camId = tile.dataset.id;
-      const status = this.cameraStatuses.get(camId);
+      const status = this.cameraStatuses.get(tile.dataset.stream || tile.dataset.id);
       if (status) {
         this.applyCameraStatus(tile, status);
       }
@@ -805,7 +813,7 @@ class StageView {
   }
 
   streamUrl(streamId) {
-    return `http://localhost:${this.apiPort}/camera/${streamId}/stream`;
+    return `http://localhost:${this.streamPort}/camera/${streamId}/stream`;
   }
 
   /** Switch a tile's reader to the right stream and show that stream's last known status. */
@@ -1516,6 +1524,7 @@ class StageView {
     // Reset state
     progress.classList.add('hidden');
     footer.style.display = '';
+    nowBtn.style.display = '';
     nowBtn.disabled = false;
     nowBtn.textContent = update.version ? `Install ${update.version}` : 'Install update';
     document.getElementById('update-later-btn').style.display = '';
@@ -1573,7 +1582,8 @@ class StageView {
 
   async installUpdate() {
     const update = this._pendingUpdate;
-    if (!update) return;
+    if (!update || this._installingUpdate) return;
+    this._installingUpdate = true;
 
     const nowBtn = document.getElementById('update-now-btn');
     const laterBtn = document.getElementById('update-later-btn');
@@ -1622,30 +1632,23 @@ class StageView {
         }
       });
 
-      // The app will restart automatically via the NSIS passive installer
-      // If for some reason it didn't, prompt the user
+      // The NSIS passive installer normally closes and restarts the app.
+      // If it didn't, ask the user to; the update stays installed either way.
       setTimeout(() => {
-        progressText.textContent = 'Update installed. Please restart the app.';
-        nowBtn.textContent = 'Restart';
-        nowBtn.disabled = false;
-        nowBtn.onclick = async () => {
-          try {
-            const { relaunch } = window.__TAURI__.process;
-            await relaunch();
-          } catch (_) {
-            progressText.textContent = 'Please close and reopen StageView.';
-          }
-        };
+        progressText.textContent = 'Update installed. Close and reopen StageView to finish.';
+        nowBtn.style.display = 'none';
+        closeBtn.style.display = '';
       }, 3000);
 
     } catch (err) {
       console.error('Update install failed:', err);
       progressText.textContent = 'Update failed: ' + err;
+      // The button's click listener calls installUpdate() again
       nowBtn.textContent = 'Try again';
       nowBtn.disabled = false;
       laterBtn.style.display = '';
       closeBtn.style.display = '';
-      nowBtn.onclick = () => this.installUpdate();
+      this._installingUpdate = false;
     }
   }
 
@@ -1768,17 +1771,22 @@ class StageView {
     const multicastInterface = document.getElementById("multicast-interface").value.trim();
 
     try {
-      // Read existing config to preserve window_state and other fields
-      const config = await invoke("get_config");
-      config.cameras = cameras;
-      config.shuffle_interval_secs = shuffleIntervalSecs;
-      config.show_status_dots = showStatusDots;
-      config.show_camera_names = showCameraNames;
-      config.api_port = apiPort;
-      config.api_token = apiToken;
-      config.multicast_interface = multicastInterface;
+      // Queued with the other saves, so a window-move save can't undo this one.
+      // Starting from the saved config preserves window_state and other fields.
+      await this.serializedConfigSave((config) => {
+        config.cameras = cameras;
+        config.shuffle_interval_secs = shuffleIntervalSecs;
+        config.show_status_dots = showStatusDots;
+        config.show_camera_names = showCameraNames;
+        config.api_port = apiPort;
+        config.api_token = apiToken;
+        config.multicast_interface = multicastInterface;
+        return config;
+      });
 
-      await invoke("save_config", { config });
+      // The camera list was rebuilt, so come back to the grid
+      this.soloIndex = null;
+      this.updateToolbar();
 
       this.cameras = cameras;
       this.displayOrder = this.cameras.map((_, i) => i); // reinitialize display order
@@ -1900,8 +1908,7 @@ class StageView {
    * Serializes config save operations to prevent concurrent get_config/save_config races.
    * @param {Function} mutator - async function that receives config, mutates it, and returns it
    */
-  async serializedConfigSave(mutator) {
-    // Chain onto any in-flight save to serialize access
+  serializedConfigSave(mutator) {
     const doSave = async () => {
       const config = await invoke("get_config");
       const updated = await mutator(config);
@@ -1909,19 +1916,10 @@ class StageView {
         await invoke("save_config", { config: updated });
       }
     };
-
-    if (this._configSavePromise) {
-      this._configSavePromise = this._configSavePromise.then(doSave, doSave);
-    } else {
-      this._configSavePromise = doSave();
-    }
-
-    try {
-      await this._configSavePromise;
-    } finally {
-      // Clear the chain when it settles so we don't keep old promises
-      this._configSavePromise = null;
-    }
+    // Every save waits for all earlier ones; a failed save doesn't block later ones
+    const result = this._configSaveChain.then(doSave, doSave);
+    this._configSaveChain = result.catch(() => {});
+    return result;
   }
 
   // ── Window State Persistence ────────────────────────────────────────────
