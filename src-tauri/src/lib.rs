@@ -1,7 +1,7 @@
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,7 +127,7 @@ struct StreamErrorEvent {
 
 struct AppState {
     config: Mutex<AppConfig>,
-    config_path: String,
+    config_path: PathBuf,
     ffmpeg_path: PathBuf,
     stream_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     reconnect_attempts: Mutex<HashMap<String, u32>>, // camera_id -> attempt count
@@ -161,8 +161,7 @@ fn save_config(state: State<AppState>, config: AppConfig) -> Result<(), String> 
     if !valid_multicast_interface(&config.multicast_interface) {
         return Err("Multicast adapter must be empty (automatic) or this PC's IPv4 address, e.g. 192.168.3.71".to_string());
     }
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(&state.config_path, json).map_err(|e| e.to_string())?;
+    write_config(&state.config_path, &config).map_err(|e| e.to_string())?;
     *state.config.lock()
         .map_err(|_| "Config mutex poisoned - please restart application".to_string())? = config;
     Ok(())
@@ -235,19 +234,18 @@ fn start_streams(state: State<AppState>, app: AppHandle) {
 
 #[tauri::command]
 fn stop_streams(state: State<AppState>, app: AppHandle) {
-    let mut tasks = match state.stream_tasks.lock() {
-        Ok(t) => t,
-        Err(_) => {
-            error!("stream_tasks mutex poisoned in stop_streams");
-            return;
-        }
+    stop_all_streams(&state, &app);
+}
+
+/// Abort every stream task and forget everything cached about the streams.
+fn stop_all_streams(state: &AppState, app: &AppHandle) {
+    let camera_ids: Vec<String> = {
+        let mut tasks = state.stream_tasks.lock().unwrap_or_else(|p| p.into_inner());
+        tasks.drain().map(|(id, handle)| { handle.abort(); id }).collect()
     };
-    let camera_ids: Vec<String> = tasks.keys().cloned().collect();
-    for (_, handle) in tasks.drain() {
-        handle.abort();
-    }
     // Clear stale health data, reconnect counters, and stream segment caches.
-    // Cameras removed from config would otherwise leave stale data indefinitely.
+    // Cameras removed from config would otherwise leave stale data indefinitely,
+    // and a camera whose URL changed would hand new clients the old stream's start.
     if let Ok(mut health) = state.stream_health.lock() {
         health.clear();
     }
@@ -260,7 +258,6 @@ fn stop_streams(state: State<AppState>, app: AppHandle) {
     if let Ok(mut recent_segs) = state.recent_segments.lock() {
         recent_segs.clear();
     }
-    drop(tasks);
     for id in camera_ids {
         let _ = app.emit("camera-status", CameraStatusEvent {
             camera_id: id,
@@ -575,25 +572,19 @@ async fn stream_camera(
             status: "connecting".to_string(),
         });
 
-        // Attempt to stream
+        // Attempt to stream. The attempt counter is reset only when video
+        // actually arrives (in process_fmp4_stream), so a camera that keeps
+        // failing backs off instead of retrying every second.
         let state = app.state::<AppState>();
-        match try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url).await {
-            Ok(()) => {
-                // Reset attempt counter on success
-                if let Ok(mut attempts) = state.reconnect_attempts.lock() {
-                    attempts.insert(camera_id.clone(), 0);
-                }
-            }
-            Err(e) => {
-                error!("Stream failed for {}: {}", camera_id, e);
-                // Only notify the frontend after 3+ failed attempts
-                // to avoid toast-flooding during normal RTP startup retries.
-                if attempt >= 3 {
-                    let _ = app.emit("stream-error", StreamErrorEvent {
-                        camera_id: camera_id.clone(),
-                        error: format!("Stream failed (attempt {}): {}", attempt, e),
-                    });
-                }
+        if let Err(e) = try_stream_camera(&app, &state, &ffmpeg_path, &camera_id, &url).await {
+            error!("Stream failed for {}: {}", camera_id, e);
+            // Only notify the frontend after 3+ failed attempts
+            // to avoid toast-flooding during normal RTP startup retries.
+            if attempt >= 3 {
+                let _ = app.emit("stream-error", StreamErrorEvent {
+                    camera_id: camera_id.clone(),
+                    error: format!("Stream failed (attempt {}): {}", attempt, e),
+                });
             }
         }
 
@@ -902,7 +893,7 @@ async fn try_stream_camera(
     // Process fMP4 stream (H.264 copy, MSE-ready).
     // _health_guard and _stderr_guard are RAII — they abort their tasks
     // automatically when this function returns (normally, via error, or cancellation).
-    process_fmp4_stream(
+    let result = process_fmp4_stream(
         stdout,
         state,
         camera_id,
@@ -910,12 +901,13 @@ async fn try_stream_camera(
         frame_count_clone,
         bytes_received_clone,
         last_frame_at_clone,
-    ).await?;
+    ).await;
 
-    // Remove health entry to prevent stale "online" status
+    // Remove health entry on every exit path, so the panel never shows a dead stream's numbers
     if let Ok(mut health_map) = state.stream_health.lock() {
         health_map.remove(camera_id);
     }
+    result?;
 
     let total_frames = frame_count.load(Ordering::Relaxed);
 
@@ -924,14 +916,14 @@ async fn try_stream_camera(
         camera_id, total_frames
     );
 
-    // If FFmpeg exited without producing any frames, mark as offline.
-    // Don't emit stream-error here — the retry wrapper (stream_camera)
-    // handles that after enough failed attempts to avoid toast-flooding.
+    // FFmpeg exiting without any video (connection refused, bad URL) is a
+    // failure: the retry wrapper backs off and, after a few, tells the user.
     if total_frames == 0 {
         let _ = app.emit("camera-status", CameraStatusEvent {
             camera_id: camera_id.to_string(),
             status: "offline".to_string(),
         });
+        return Err("FFmpeg exited before sending any video".into());
     }
 
     Ok(())
@@ -1478,18 +1470,42 @@ fn config_dir() -> std::path::PathBuf {
         .join("StageView")
 }
 
-fn load_config() -> (AppConfig, String) {
+fn load_config() -> (AppConfig, PathBuf) {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join("config.json");
-    let path_str = path.to_string_lossy().to_string();
+    (read_config(&path), path)
+}
 
-    let config = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+/// The config at `path`, or the default when there is none. A file that exists
+/// but won't parse is copied aside first, so the next save can't erase the
+/// cameras it holds.
+fn read_config(path: &Path) -> AppConfig {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return AppConfig::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(config) => config,
+        Err(e) => {
+            let backup = path.with_extension("json.unreadable");
+            error!("Config at {} is unreadable ({}); kept a copy at {}", path.display(), e, backup.display());
+            let _ = std::fs::copy(path, &backup);
+            AppConfig::default()
+        }
+    }
+}
 
-    (config, path_str)
+/// Write the config so a crash or power cut mid-save leaves the old file intact:
+/// write a temporary file, flush it to disk, then rename it over the original.
+fn write_config(path: &Path, config: &AppConfig) -> std::io::Result<()> {
+    use std::io::Write;
+    let json = serde_json::to_string_pretty(config)?;
+    let tmp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1581,27 +1597,7 @@ async fn api_fullscreen(app: AppHandle) -> Result<serde_json::Value, String> {
 async fn api_reload(app: AppHandle, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     info!("API reload requested");
 
-    // Stop existing streams
-    {
-        let mut tasks = state.stream_tasks.lock().map_err(|_| "stream_tasks mutex poisoned")?;
-        let camera_ids: Vec<String> = tasks.keys().cloned().collect();
-        for (_, handle) in tasks.drain() {
-            handle.abort();
-        }
-        let mut health = state.stream_health.lock().map_err(|_| "stream_health mutex poisoned")?;
-        health.clear();
-        let mut attempts = state.reconnect_attempts.lock().map_err(|_| "reconnect_attempts mutex poisoned")?;
-        attempts.clear();
-        drop(health);
-        drop(attempts);
-        drop(tasks);
-        for id in camera_ids {
-            let _ = app.emit("camera-status", CameraStatusEvent {
-                camera_id: id,
-                status: "offline".to_string(),
-            });
-        }
-    }
+    stop_all_streams(&state, &app);
 
     // Reload config from disk
     let (config, _) = load_config();
@@ -2028,5 +2024,50 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(r#"{"cameras":[],"shuffle_interval_secs":900}"#).unwrap();
         assert_eq!(cfg.last_update_check, 0);
         assert_eq!(cfg.last_seen_version, "");
+    }
+
+    /// A fresh, empty directory for one test's files.
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("stageview-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn config_round_trips_and_leaves_no_temp_file() {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("config.json");
+        let mut cfg = AppConfig::default();
+        cfg.cameras.push(cam("rtsp://x/main", None));
+        write_config(&path, &cfg).unwrap();
+        cfg.api_port = 9000;
+        write_config(&path, &cfg).unwrap(); // replaces an existing file
+
+        let back = read_config(&path);
+        assert_eq!(back.cameras.len(), 1);
+        assert_eq!(back.api_port, 9000);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_config_gives_defaults() {
+        let dir = temp_dir("missing");
+        assert_eq!(read_config(&dir.join("config.json")).cameras.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_config_is_kept_aside_not_lost() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"cameras":[{"id":"a","name":"Foyer""#).unwrap();
+
+        let cfg = read_config(&path);
+        assert_eq!(cfg.cameras.len(), 0);
+        let kept = std::fs::read_to_string(path.with_extension("json.unreadable")).unwrap();
+        assert!(kept.contains("Foyer"), "the broken file's contents survive for recovery");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
