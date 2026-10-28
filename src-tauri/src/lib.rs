@@ -601,7 +601,8 @@ fn build_input_args(url: &str, multicast_iface: Option<&str>) -> (Vec<String>, S
             "-probesize".into(),       "1000000".into(),  // 1MB probe
             "-fflags".into(),          "+genpts+nobuffer+discardcorrupt+fastseek".into(),
             "-flags".into(),           "low_delay".into(),
-            "-avioflags".into(),       "direct".into(),
+            // No "-avioflags direct" here or for SRT: it reads each datagram into a
+            // buffer smaller than the packet, and FFmpeg never gets a whole one.
             "-buffer_size".into(),     "2000000".into(),
             "-overrun_nonfatal".into(),"1".into(),
             "-thread_queue_size".into(),"512".into(),
@@ -626,7 +627,6 @@ fn build_input_args(url: &str, multicast_iface: Option<&str>) -> (Vec<String>, S
             "-probesize".into(),       "50000".into(),
             "-fflags".into(),          "+nobuffer+discardcorrupt+fastseek".into(),
             "-flags".into(),           "low_delay".into(),
-            "-avioflags".into(),       "direct".into(),
             "-thread_queue_size".into(),"512".into(),
             "-timeout".into(),         "10000000".into(), // 10s input timeout
         ]);
@@ -1668,6 +1668,15 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-stimeout"), "FFmpeg 5+ rejects -stimeout");
         assert_eq!(arg_after(&args, "-timeout"), Some("10000000"));
         assert_eq!(arg_after(&args, "-rtsp_transport"), Some("tcp"));
+    }
+
+    #[test]
+    fn packet_protocols_do_not_use_direct_io() {
+        // "-avioflags direct" makes FFmpeg drop UDP datagrams and SRT packets: no video at all
+        for url in ["udp://239.1.1.1:5000", "srt://10.0.0.1:9000"] {
+            let (args, _) = build_input_args(url, None);
+            assert_eq!(arg_after(&args, "-avioflags"), None, "{url}");
+        }
     }
 
     #[test]

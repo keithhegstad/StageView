@@ -1857,38 +1857,43 @@ class StageView {
   async setupWindowStatePersistence() {
     const currentWindow = getCurrentWindow();
     let saveTimeout;
-    let lastSavedState = null;
 
-    const saveWindowState = async () => {
+    const scheduleSave = () => {
       clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(async () => {
-        try {
-          const position = await currentWindow.outerPosition();
-          const size = await currentWindow.outerSize();
-          const maximized = await currentWindow.isMaximized();
-          const newState = { x: position.x, y: position.y, width: size.width, height: size.height, maximized };
-
-          // Skip save if nothing changed
-          if (lastSavedState &&
-              lastSavedState.x === newState.x && lastSavedState.y === newState.y &&
-              lastSavedState.width === newState.width && lastSavedState.height === newState.height &&
-              lastSavedState.maximized === newState.maximized) {
-            return;
-          }
-
-          await this.serializedConfigSave(async (config) => {
-            config.window_state = newState;
-            return config;
-          });
-          lastSavedState = newState;
-        } catch (err) {
-          // Silently fail
-        }
+      saveTimeout = setTimeout(() => {
+        this.saveWindowState(currentWindow).catch(() => { /* next move or resize tries again */ });
       }, 2000);
     };
 
-    await currentWindow.listen("tauri://resize", saveWindowState);
-    await currentWindow.listen("tauri://move", saveWindowState);
+    await currentWindow.listen("tauri://resize", scheduleSave);
+    await currentWindow.listen("tauri://move", scheduleSave);
+  }
+
+  /**
+   * Remember where the window is for the next launch. Not while minimized:
+   * Windows then reports a parking spot (-32000, -32000) and a title-bar-sized
+   * window, and a PC shut down that way would forget its place.
+   */
+  async saveWindowState(win) {
+    if (await win.isMinimized()) return;
+    const position = await win.outerPosition();
+    const size = await win.outerSize();
+    const maximized = await win.isMaximized();
+    const newState = { x: position.x, y: position.y, width: size.width, height: size.height, maximized };
+
+    // Skip save if nothing changed
+    const last = this._lastWindowState;
+    if (last && last.x === newState.x && last.y === newState.y &&
+        last.width === newState.width && last.height === newState.height &&
+        last.maximized === newState.maximized) {
+      return;
+    }
+
+    await this.serializedConfigSave((config) => {
+      config.window_state = newState;
+      return config;
+    });
+    this._lastWindowState = newState;
   }
 
   setupIdleHiding() {
